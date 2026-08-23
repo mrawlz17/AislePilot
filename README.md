@@ -1,4 +1,4 @@
-# Grocery Companion v0.2.2
+# Grocery Companion v0.2.3
 
 A reliability-first local web app for planning and shopping Walmart and Sam's Club grocery trips.
 
@@ -23,7 +23,7 @@ A reliability-first local web app for planning and shopping Walmart and Sam's Cl
 
 ## Screenshot import
 
-V0.2.2 keeps screenshot import a primary planning workflow. Select one or more Walmart or Sam's Club cart screenshots and the app runs OCR in the browser, uses the on-screen product layout to associate names with the right-side current price, verifies the price column in a separate OCR pass, removes likely duplicates caused by overlapping screenshots, and opens a mandatory review screen before saving anything.
+V0.2.3 keeps screenshot import a primary planning workflow. Select one or more Walmart or Sam's Club cart screenshots and the app runs OCR in the browser, uses the on-screen product layout to associate names with the right-side current price, verifies the price column in a separate OCR pass, removes likely duplicates caused by overlapping screenshots, and opens a mandatory review screen before saving anything.
 
 This release specifically tightens Walmart screenshot parsing so unit prices, crossed-out old prices, savings amounts, header text, and quantity metadata are not imported as separate grocery items.
 
@@ -57,8 +57,13 @@ Then enable GitHub Pages for the repository branch/folder containing the files.
 The app stores its data in the browser's localStorage. Use **Settings → Export backup** before clearing browser data or moving to another device.
 
 
-## v0.2.2 reliability fix
-- Added three OCR CDN/startup fallbacks instead of relying on one implicit path.
-- Worker, core, and language-data URLs are now explicit.
-- OCR failure dialogs now show a compact diagnostic instead of assuming the user has no internet connection.
-- No trip data is mutated until the review screen is confirmed.
+
+## v0.2.3 iPhone OCR reliability fix
+
+- Added a same-origin OCR bridge through the app service worker for iPhone Safari/WebKit.
+- The OCR worker, WebAssembly core loader, and English traineddata are now requested from Grocery Companion's own origin; the service worker retrieves pinned upstream assets and caches them locally.
+- The Tesseract worker no longer depends on a cross-origin `importScripts()` call on the primary iPhone path.
+- Uses the smaller Tesseract English `4.0.0_best_int` language model first, reducing first-run transfer and memory pressure.
+- Retains direct CDN fallbacks if the same-origin bridge cannot initialize.
+- OCR assets are cached after the first successful import so later imports do not need to download them again unless app data/site storage is cleared or the OCR version changes.
+- Trip data is still not changed until the import review is confirmed.

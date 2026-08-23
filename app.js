@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.2.2';
+  const APP_VERSION = '0.2.3';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
 
@@ -737,23 +737,30 @@
       script:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
       workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
       corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
-      langPath:'https://tessdata.projectnaptha.com/4.0.0'
+      langPath:'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int',
+      workerBlobURL:true
     },
     {
       label:'cdnjs + unpkg',
       script:'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js',
       workerPath:'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js',
       corePath:'https://unpkg.com/tesseract.js-core@5.1.1',
-      langPath:'https://tessdata.projectnaptha.com/4.0.0'
+      langPath:'https://unpkg.com/@tesseract.js-data/eng/4.0.0_best_int',
+      workerBlobURL:true
     },
     {
       label:'unpkg',
       script:'https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js',
       workerPath:'https://unpkg.com/tesseract.js@5.1.1/dist/worker.min.js',
       corePath:'https://unpkg.com/tesseract.js-core@5.1.1',
-      langPath:'https://tessdata.projectnaptha.com/4.0.0'
+      langPath:'https://unpkg.com/@tesseract.js-data/eng/4.0.0_best_int',
+      workerBlobURL:true
     }
   ];
+
+  function appAssetUrl(relativePath) {
+    return new URL(relativePath, document.baseURI).href;
+  }
 
   function loadExternalScript(url, timeoutMs=18000) {
     return new Promise((resolve,reject)=>{
@@ -793,9 +800,50 @@
     throw new Error(`OCR library could not load${lastErr?.message?`: ${lastErr.message}`:''}`);
   }
 
+  async function ensureOcrServiceWorker(onAttempt) {
+    if (!('serviceWorker' in navigator)) return false;
+    try {
+      onAttempt?.('Preparing same-origin OCR bridge…');
+      const registration=await navigator.serviceWorker.register('./sw.js');
+      try { await registration.update(); } catch {}
+      await navigator.serviceWorker.ready;
+      if (navigator.serviceWorker.controller) return true;
+
+      // skipWaiting + clients.claim normally gives the current page a controller
+      // without a reload. Wait briefly for that handoff before falling back.
+      await new Promise(resolve=>{
+        let finished=false;
+        const finish=()=>{ if(finished) return; finished=true; clearTimeout(timer); navigator.serviceWorker.removeEventListener('controllerchange',finish); resolve(); };
+        const timer=setTimeout(finish,4500);
+        navigator.serviceWorker.addEventListener('controllerchange',finish,{once:true});
+      });
+      return !!navigator.serviceWorker.controller;
+    } catch(err) {
+      console.warn('OCR service-worker bridge unavailable',err);
+      return false;
+    }
+  }
+
   async function createOcrWorker(Tesseract, onAttempt, onLog) {
     let lastErr=null;
-    for (const source of OCR_SOURCES) {
+    const candidates=[];
+
+    if (await ensureOcrServiceWorker(onAttempt)) {
+      // Safari/WebKit is much more reliable when the Worker, core script, and
+      // traineddata appear to come from the same origin. The service worker
+      // securely relays and caches the pinned upstream assets behind these URLs.
+      candidates.push({
+        label:'same-origin bridge',
+        workerPath:appAssetUrl('./ocr/worker.min.js'),
+        corePath:appAssetUrl('./ocr/core').replace(/\/$/,''),
+        langPath:appAssetUrl('./ocr/lang').replace(/\/$/,''),
+        workerBlobURL:false
+      });
+    }
+
+    candidates.push(...OCR_SOURCES);
+
+    for (const source of candidates) {
       let worker=null;
       try {
         onAttempt?.(`Starting OCR engine via ${source.label}…`);
@@ -803,7 +851,7 @@
           workerPath:source.workerPath,
           corePath:source.corePath,
           langPath:source.langPath,
-          workerBlobURL:true,
+          workerBlobURL:source.workerBlobURL !== false,
           logger:m=>onLog?.(m),
           errorHandler:err=>console.error(`OCR worker error (${source.label})`,err)
         });
