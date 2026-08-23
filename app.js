@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.2.3';
+  const APP_VERSION = '0.2.4';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
 
@@ -731,30 +731,34 @@
     }));
   }
 
-  const OCR_SOURCES = [
+  const OCR_CACHE = 'grocery-ocr-v0.2.4';
+  const OCR_LIBRARY_SOURCES = [
+    {label:'jsDelivr', url:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'},
+    {label:'cdnjs', url:'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js'},
+    {label:'unpkg', url:'https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js'}
+  ];
+  const OCR_ASSETS = [
     {
-      label:'jsDelivr',
-      script:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
-      workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
-      corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
-      langPath:'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int',
-      workerBlobURL:true
+      key:'worker', label:'OCR worker', local:'./ocr/worker.min.js', minBytes:50000, type:'application/javascript; charset=utf-8',
+      remotes:[
+        'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+        'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js',
+        'https://unpkg.com/tesseract.js@5.1.1/dist/worker.min.js'
+      ]
     },
     {
-      label:'cdnjs + unpkg',
-      script:'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js',
-      workerPath:'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js',
-      corePath:'https://unpkg.com/tesseract.js-core@5.1.1',
-      langPath:'https://unpkg.com/@tesseract.js-data/eng/4.0.0_best_int',
-      workerBlobURL:true
+      key:'core', label:'OCR WebAssembly core', local:'./ocr/tesseract-core-lstm.wasm.js', minBytes:1000000, type:'application/javascript; charset=utf-8',
+      remotes:[
+        'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1/tesseract-core-lstm.wasm.js',
+        'https://unpkg.com/tesseract.js-core@5.1.1/tesseract-core-lstm.wasm.js'
+      ]
     },
     {
-      label:'unpkg',
-      script:'https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js',
-      workerPath:'https://unpkg.com/tesseract.js@5.1.1/dist/worker.min.js',
-      corePath:'https://unpkg.com/tesseract.js-core@5.1.1',
-      langPath:'https://unpkg.com/@tesseract.js-data/eng/4.0.0_best_int',
-      workerBlobURL:true
+      key:'language', label:'English OCR language model', local:'./ocr/eng.traineddata.gz', minBytes:500000, type:'application/octet-stream',
+      remotes:[
+        'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz',
+        'https://unpkg.com/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz'
+      ]
     }
   ];
 
@@ -762,11 +766,19 @@
     return new URL(relativePath, document.baseURI).href;
   }
 
-  function loadExternalScript(url, timeoutMs=18000) {
+  async function fetchWithTimeout(url, timeoutMs=30000) {
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    try {
+      const response=await fetch(url,{mode:'cors',cache:'no-store',signal:controller.signal});
+      if(!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response;
+    } finally { clearTimeout(timer); }
+  }
+
+  function loadScriptUrl(url, timeoutMs=18000) {
     return new Promise((resolve,reject)=>{
-      const prior=[...document.scripts].find(el=>el.src===url);
-      if (prior && window.Tesseract?.createWorker) return resolve();
-      const script=prior || document.createElement('script');
+      const script=document.createElement('script');
       let done=false;
       const finish=(ok,err)=>{
         if(done) return; done=true; clearTimeout(timer);
@@ -777,92 +789,158 @@
       script.async=true;
       script.dataset.ocrEngine='tesseract';
       script.onload=()=>finish(!!window.Tesseract?.createWorker,new Error('OCR library loaded without createWorker'));
-      script.onerror=()=>finish(false,new Error('OCR library download failed'));
-      if(!prior){ script.src=url; document.head.appendChild(script); }
+      script.onerror=()=>finish(false,new Error('OCR library script execution failed'));
+      script.src=url;
+      document.head.appendChild(script);
     });
   }
 
   async function ensureTesseract(onAttempt) {
-    if (window.Tesseract?.createWorker) return window.Tesseract;
+    if(window.Tesseract?.createWorker) return window.Tesseract;
     let lastErr=null;
-    for (const source of OCR_SOURCES) {
+    for(const source of OCR_LIBRARY_SOURCES) {
+      let blobUrl='';
       try {
-        onAttempt?.(`Loading OCR library from ${source.label}…`);
-        await loadExternalScript(source.script);
+        onAttempt?.(`Downloading OCR library from ${source.label}…`);
+        const response=await fetchWithTimeout(source.url,20000);
+        const code=await response.text();
+        if(code.length<30000) throw new Error('OCR library download was incomplete');
+        blobUrl=URL.createObjectURL(new Blob([code],{type:'application/javascript'}));
+        onAttempt?.('Starting OCR library…');
+        await loadScriptUrl(blobUrl);
         if(window.Tesseract?.createWorker) return window.Tesseract;
       } catch(err) {
         lastErr=err;
-        document.querySelectorAll('script[data-ocr-engine]').forEach(el=>{
-          if(!window.Tesseract?.createWorker) el.remove();
-        });
+        document.querySelectorAll('script[data-ocr-engine]').forEach(el=>el.remove());
+      } finally {
+        if(blobUrl) setTimeout(()=>URL.revokeObjectURL(blobUrl),1000);
       }
     }
     throw new Error(`OCR library could not load${lastErr?.message?`: ${lastErr.message}`:''}`);
   }
 
-  async function ensureOcrServiceWorker(onAttempt) {
-    if (!('serviceWorker' in navigator)) return false;
-    try {
-      onAttempt?.('Preparing same-origin OCR bridge…');
-      const registration=await navigator.serviceWorker.register('./sw.js');
-      try { await registration.update(); } catch {}
-      await navigator.serviceWorker.ready;
-      if (navigator.serviceWorker.controller) return true;
-
-      // skipWaiting + clients.claim normally gives the current page a controller
-      // without a reload. Wait briefly for that handoff before falling back.
-      await new Promise(resolve=>{
-        let finished=false;
-        const finish=()=>{ if(finished) return; finished=true; clearTimeout(timer); navigator.serviceWorker.removeEventListener('controllerchange',finish); resolve(); };
-        const timer=setTimeout(finish,4500);
-        navigator.serviceWorker.addEventListener('controllerchange',finish,{once:true});
-      });
-      return !!navigator.serviceWorker.controller;
-    } catch(err) {
-      console.warn('OCR service-worker bridge unavailable',err);
-      return false;
-    }
+  function getServiceWorkerVersion(controller,timeoutMs=1500) {
+    return new Promise(resolve=>{
+      if(!controller) return resolve('');
+      const channel=new MessageChannel();
+      let done=false;
+      const finish=value=>{ if(done) return; done=true; clearTimeout(timer); resolve(value||''); };
+      const timer=setTimeout(()=>finish(''),timeoutMs);
+      channel.port1.onmessage=e=>finish(e.data?.version||'');
+      try { controller.postMessage({type:'GET_VERSION'},[channel.port2]); }
+      catch { finish(''); }
+    });
   }
 
-  async function createOcrWorker(Tesseract, onAttempt, onLog) {
+  async function ensureOcrServiceWorker(onAttempt) {
+    if(!('serviceWorker' in navigator)) throw new Error('This browser does not support service workers');
+    onAttempt?.('Preparing local OCR storage…');
+    const registration=await navigator.serviceWorker.register('./sw.js');
+    try { await registration.update(); } catch {}
+    await navigator.serviceWorker.ready;
+
+    let controller=navigator.serviceWorker.controller;
+    let version=await getServiceWorkerVersion(controller);
+    if(version==='0.2.4') return registration;
+
+    // An older Grocery Companion service worker may still control the page
+    // immediately after a GitHub Pages update. Ask the waiting worker to take
+    // over and wait for the controller handoff instead of silently using stale
+    // OCR routing code.
+    try { registration.waiting?.postMessage({type:'SKIP_WAITING'}); } catch {}
+    onAttempt?.('Activating updated OCR support…');
+    await new Promise(resolve=>{
+      let finished=false;
+      const finish=()=>{ if(finished) return; finished=true; clearTimeout(timer); navigator.serviceWorker.removeEventListener('controllerchange',finish); resolve(); };
+      const timer=setTimeout(finish,6500);
+      navigator.serviceWorker.addEventListener('controllerchange',finish,{once:true});
+    });
+    controller=navigator.serviceWorker.controller;
+    version=await getServiceWorkerVersion(controller);
+    if(version!=='0.2.4') throw new Error('The updated OCR service worker is not active yet. Reload this page once, then retry.');
+    return registration;
+  }
+
+  async function cacheOcrAsset(asset,onAttempt) {
+    const localUrl=appAssetUrl(asset.local);
+    const request=new Request(localUrl,{method:'GET'});
+    const cache=await caches.open(OCR_CACHE);
+    const existing=await cache.match(request);
+    if(existing) {
+      const size=Number(existing.headers.get('X-Grocery-OCR-Bytes')||0);
+      if(size>=asset.minBytes) return {asset,bytes:size,cached:true};
+      await cache.delete(request);
+    }
+
     let lastErr=null;
-    const candidates=[];
-
-    if (await ensureOcrServiceWorker(onAttempt)) {
-      // Safari/WebKit is much more reliable when the Worker, core script, and
-      // traineddata appear to come from the same origin. The service worker
-      // securely relays and caches the pinned upstream assets behind these URLs.
-      candidates.push({
-        label:'same-origin bridge',
-        workerPath:appAssetUrl('./ocr/worker.min.js'),
-        corePath:appAssetUrl('./ocr/core').replace(/\/$/,''),
-        langPath:appAssetUrl('./ocr/lang').replace(/\/$/,''),
-        workerBlobURL:false
-      });
-    }
-
-    candidates.push(...OCR_SOURCES);
-
-    for (const source of candidates) {
-      let worker=null;
+    for(const remote of asset.remotes) {
       try {
-        onAttempt?.(`Starting OCR engine via ${source.label}…`);
-        worker=await Tesseract.createWorker('eng', 1, {
-          workerPath:source.workerPath,
-          corePath:source.corePath,
-          langPath:source.langPath,
-          workerBlobURL:source.workerBlobURL !== false,
-          logger:m=>onLog?.(m),
-          errorHandler:err=>console.error(`OCR worker error (${source.label})`,err)
+        onAttempt?.(`Downloading ${asset.label}…`);
+        const response=await fetchWithTimeout(remote,45000);
+        const body=await response.arrayBuffer();
+        if(body.byteLength<asset.minBytes) throw new Error(`download was only ${body.byteLength} bytes`);
+        const localResponse=new Response(body,{
+          status:200,
+          headers:{
+            'Content-Type':asset.type,
+            'Cache-Control':'public, max-age=31536000, immutable',
+            'X-Grocery-OCR-Bytes':String(body.byteLength)
+          }
         });
-        return {worker,source};
-      } catch(err) {
-        lastErr=err;
-        try { await worker?.terminate?.(); } catch {}
-        console.warn(`OCR startup failed via ${source.label}`,err);
-      }
+        await cache.put(request,localResponse);
+        return {asset,bytes:body.byteLength,cached:false};
+      } catch(err) { lastErr=err; }
     }
-    throw new Error(`OCR worker could not start${lastErr?.message?`: ${lastErr.message}`:''}`);
+    throw new Error(`${asset.label} could not download${lastErr?.message?`: ${lastErr.message}`:''}`);
+  }
+
+  async function prepareLocalOcrAssets(onAttempt) {
+    await ensureOcrServiceWorker(onAttempt);
+    if(!('caches' in window)) throw new Error('This browser does not support local OCR caching');
+    const results=[];
+    for(const asset of OCR_ASSETS) results.push(await cacheOcrAsset(asset,onAttempt));
+    return results;
+  }
+
+  async function verifyLocalOcrAsset(relativePath,minBytes) {
+    const url=appAssetUrl(relativePath);
+    const response=await fetch(url,{cache:'no-store'});
+    if(!response.ok) throw new Error(`${relativePath} returned HTTP ${response.status}`);
+    const body=await response.arrayBuffer();
+    if(body.byteLength<minBytes) throw new Error(`${relativePath} returned only ${body.byteLength} bytes`);
+    return body.byteLength;
+  }
+
+  async function createOcrWorker(Tesseract,onAttempt,onLog) {
+    await prepareLocalOcrAssets(onAttempt);
+
+    // Verify that Safari is actually receiving the staged files through the
+    // service worker before Tesseract is allowed to start. This turns the old
+    // generic "Load failed" into a filename-specific setup error.
+    onAttempt?.('Verifying local OCR files…');
+    await verifyLocalOcrAsset('./ocr/worker.min.js',50000);
+    await verifyLocalOcrAsset('./ocr/tesseract-core-lstm.wasm.js',1000000);
+    await verifyLocalOcrAsset('./ocr/eng.traineddata.gz',500000);
+
+    let worker=null;
+    try {
+      onAttempt?.('Starting local OCR engine…');
+      worker=await Tesseract.createWorker('eng',1,{
+        workerPath:appAssetUrl('./ocr/worker.min.js'),
+        // Deliberately use the non-SIMD LSTM core. It is slower, but it avoids
+        // WebKit/SIMD capability-selection failures and is the reliability-first
+        // choice for this iPhone-focused app.
+        corePath:appAssetUrl('./ocr/tesseract-core-lstm.wasm.js'),
+        langPath:appAssetUrl('./ocr/'),
+        workerBlobURL:false,
+        logger:m=>onLog?.(m),
+        errorHandler:err=>console.error('OCR worker error',err)
+      });
+      return {worker,source:{label:'locally staged OCR'}};
+    } catch(err) {
+      try { await worker?.terminate?.(); } catch {}
+      throw new Error(`Local OCR engine could not start${err?.message?`: ${err.message}`:''}`);
+    }
   }
 
   function compactOcrError(err) {
@@ -954,7 +1032,7 @@
       const detailMessage=compactOcrError(err);
       openModal('Screenshot import unavailable', `
         <p>The OCR engine could not complete this import.</p>
-        <p class="small muted">The app tried multiple OCR delivery paths. Your current trip and grocery list were not changed.</p>
+        <p class="small muted">The app could not stage or start its local OCR files. Your current trip and grocery list were not changed.</p>
         <div class="info-box"><strong>Diagnostic</strong><div class="small" style="margin-top:6px;word-break:break-word">${escapeHtml(detailMessage)}</div></div>
         <p class="small muted" style="margin-bottom:0">If this appears again, send a screenshot of this diagnostic. It identifies whether iPhone Safari blocked the OCR library, worker, language data, or WebAssembly core.</p>
       `);
