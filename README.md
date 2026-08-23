@@ -1,4 +1,4 @@
-# Grocery Companion v0.2.0
+# Grocery Companion v0.2.1
 
 A reliability-first local web app for planning and shopping Walmart and Sam's Club grocery trips.
 
@@ -23,7 +23,9 @@ A reliability-first local web app for planning and shopping Walmart and Sam's Cl
 
 ## Screenshot import
 
-V0.2.0 makes screenshot import a primary planning workflow. Select one or more Walmart or Sam's Club cart screenshots and the app runs OCR in the browser, pairs likely product names with prices, removes likely duplicates caused by overlapping screenshots, and opens a mandatory review screen before saving anything.
+V0.2.1 makes screenshot import a primary planning workflow. Select one or more Walmart or Sam's Club cart screenshots and the app runs OCR in the browser, uses the on-screen product layout to associate names with the right-side current price, verifies the price column in a separate OCR pass, removes likely duplicates caused by overlapping screenshots, and opens a mandatory review screen before saving anything.
+
+This release specifically tightens Walmart screenshot parsing so unit prices, crossed-out old prices, savings amounts, header text, and quantity metadata are not imported as separate grocery items.
 
 The first OCR run needs an internet connection to load the browser OCR engine. If OCR fails, the current trip is left unchanged. Manual entry and the paste importer remain available as fallbacks.
 

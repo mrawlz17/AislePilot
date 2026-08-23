@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.2.0';
+  const APP_VERSION = '0.2.1';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
 
@@ -162,8 +162,8 @@
       [['milk','egg','cheese','yogurt','butter','cream'], 'Dairy'],
       [['frozen','pizza','ice cream','fries','waffle'], 'Frozen'],
       [['soda','water','juice','gatorade','drink','coffee'], 'Drinks'],
-      [['detergent','paper towel','toilet paper','trash bag','dish soap','cleaner'], 'Household'],
-      [['shampoo','soap','toothpaste','deodorant','razor'], 'Personal Care']
+      [['detergent','paper towel','toilet paper','trash bag','dish soap','cleaner','cat litter','litter'], 'Household'],
+      [['shampoo','soap','toothpaste','deodorant','antiperspirant','razor','cotton swab','cold and flu','cold & flu'], 'Personal Care']
     ];
     for (const [terms, category] of rules) if (terms.some(t=>n.includes(t))) return category;
     return 'Pantry';
@@ -432,87 +432,303 @@
   }
 
   function isOcrNoise(line) {
-    const l=line.toLowerCase();
-    if (!/[a-z]/i.test(line)) return true;
+    const l=String(line||'').toLowerCase().trim();
+    if (!/[a-z]/i.test(l)) return true;
     const phrases=[
       'subtotal','estimated total','order total','checkout','tax','savings','you saved','cart summary',
       'pickup','delivery','shipping','remove','save for later','move to','options','substitution','substitutions',
       'current price','original price','price when purchased online','price per unit','each','in stock','out of stock',
       'sold and shipped','fulfilled by','sponsored','add to list','add to cart','continue shopping','search walmart',
-      'search sam','membership','free shipping','protection plan','walmart cash','reorder','buy now'
+      'search sam','membership','free shipping','protection plan','walmart cash','reorder','buy now','items shopped',
+      'add/edit pickup person','request cancellation','add to calendar','need more help'
     ];
-    return phrases.some(p=>l===p || l.startsWith(p+' ') || l.includes(' '+p+' '));
+    if (phrases.some(p=>l===p || l.startsWith(p+' ') || l.includes(' '+p+' '))) return true;
+    if (/^(?:multipack quantity|qty\b|quantity\b|flavor:|total count:|product line:|18\+\b)/i.test(l)) return true;
+    if (/\bfrom savings\b/i.test(l)) return true;
+    if (/\d+(?:\.\d+)?\s*¢\s*\//i.test(l)) return true;
+    if (/^\$?\s*\d+(?:[.,]\d+)?\s*\/\s*(?:fl\s*)?(?:oz|lb|ea)\b/i.test(l)) return true;
+    if (/^\$?\s*\d+(?:[.,]\d+)?\s*(?:ea|each)\b/i.test(l)) return true;
+    return false;
   }
 
   function extractPrice(line) {
     const raw=String(line).trim();
-    const dollarLike=raw.match(/\$\s*([0-9]{1,4})\s*[.,]\s*([0-9]{2})\b/);
+    const dollarLike=raw.match(/\$\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\b/);
     if (dollarLike) return num(`${dollarLike[1]}.${dollarLike[2]}`,0);
-    const sLike=raw.match(/^S\s*([0-9]{1,4})\s*[.,]\s*([0-9]{2})\b/i);
+    const sLike=raw.match(/^S\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\b/i);
     if (sLike) return num(`${sLike[1]}.${sLike[2]}`,0);
-    const dollarWhole=raw.match(/\$\s*([0-9]{1,4})\b/);
-    if (dollarWhole) return num(dollarWhole[1],0);
-    const exact=raw.match(/^\s*([0-9]{1,4})\s*[.,]\s*([0-9]{2})\s*$/);
+    const exact=raw.match(/^\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\s*$/);
     return exact ? num(`${exact[1]}.${exact[2]}`,0) : null;
+  }
+
+  function extractScreenPrice(line) {
+    const raw=String(line||'');
+    const matches=[...raw.matchAll(/\$\s*([0-9]{1,3})\s*(?:[.,]|\s)\s*([0-9]{2})(?!\d)/g)];
+    if (!matches.length) return null;
+    const m=matches[matches.length-1];
+    const value=num(`${m[1]}.${m[2]}`,NaN);
+    return Number.isFinite(value) ? {value,match:m[0]} : null;
   }
 
   function normalizeItemIdentity(name) {
     return String(name).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
   }
 
+  function flattenOcrBlocks(blocks) {
+    const lines=[];
+    for (const block of (blocks||[])) {
+      for (const paragraph of (block?.paragraphs||[])) {
+        for (const line of (paragraph?.lines||[])) {
+          const text=normalizeOcrLine(line?.text||'');
+          if (!text) continue;
+          const b=line?.bbox||{};
+          const words=line?.words||[];
+          const wordData=words.map(w=>{
+            const wb=w?.bbox||{};
+            return {text:normalizeOcrLine(w?.text||''),confidence:num(w?.confidence,0),x0:num(wb.x0,0),y0:num(wb.y0,0),x1:num(wb.x1,0),y1:num(wb.y1,0)};
+          });
+          const confidences=wordData.map(w=>w.confidence).filter(v=>v>=0);
+          lines.push({
+            text,
+            x0:num(b.x0,0), y0:num(b.y0,0), x1:num(b.x1,0), y1:num(b.y1,0),
+            confidence:confidences.length ? confidences.reduce((a,b)=>a+b,0)/confidences.length : 0,
+            words:wordData
+          });
+        }
+      }
+    }
+    return lines.sort((a,b)=>(a.y0-b.y0)||(a.x0-b.x0));
+  }
+
+  function lineCenterY(line) {
+    return (num(line?.y0,0)+num(line?.y1,0))/2;
+  }
+
+  function stripScreenPrice(text) {
+    return normalizeOcrLine(String(text||'')
+      .replace(/\$\s*[0-9]{1,3}\s*(?:[.,]|\s)\s*[0-9]{2}(?:\s*(?:ea|each))?/ig,' ')
+      .replace(/\s*\$.*$/,' ')
+      .replace(/^[•·\-–—=°*\s]+|[•·\-–—=°*\s]+$/g,' '));
+  }
+
+  function tokenSimilarity(a,b) {
+    const aa=normalizeItemIdentity(a).split(' ').filter(Boolean);
+    const bb=normalizeItemIdentity(b).split(' ').filter(Boolean);
+    if (!aa.length || !bb.length) return 0;
+    const A=new Set(aa), B=new Set(bb);
+    let intersection=0;
+    for (const token of A) if (B.has(token)) intersection++;
+    const union=new Set([...A,...B]).size;
+    return union ? intersection/union : 0;
+  }
+
+  function dedupeScreenshotItems(items) {
+    const out=[];
+    for (const item of items) {
+      const total=Math.round(item.unitPrice*item.qty*100)/100;
+      let matchIndex=-1;
+      for (let i=0;i<out.length;i++) {
+        const existing=out[i];
+        const existingTotal=Math.round(existing.unitPrice*existing.qty*100)/100;
+        if (Math.abs(existingTotal-total)>0.03) continue;
+        const a=normalizeItemIdentity(existing.name), b=normalizeItemIdentity(item.name);
+        const similar=(a.length>12 && b.length>12 && (a.includes(b)||b.includes(a))) || tokenSimilarity(a,b)>=0.72;
+        if (similar) { matchIndex=i; break; }
+      }
+      if (matchIndex<0) {
+        out.push({...item});
+        continue;
+      }
+      const current=out[matchIndex];
+      const currentScore=(current._qtyDetected?3:0)+Math.min(current.name.length,120)/120;
+      const incomingScore=(item._qtyDetected?3:0)+Math.min(item.name.length,120)/120;
+      if (incomingScore>currentScore) out[matchIndex]={...item};
+      else if (item.name.length>current.name.length) {
+        current.name=item.name;
+        current.category=suggestCategory(state.currentTrip?.store||'Walmart',item.name);
+      }
+    }
+    return out.map(({_qtyDetected,...item})=>item);
+  }
+
+  function screenshotPriceCandidates(lines,width,source) {
+    const out=[];
+    for (const line of (lines||[])) {
+      const cy=lineCenterY(line);
+      if (cy<320) continue;
+      const parsed=extractScreenPrice(line.text);
+      if (!parsed || parsed.value<=0 || parsed.value>200) continue;
+      if (num(line.x1,0)<width*0.80) continue;
+      const priceWords=(line.words||[]).filter(w=>num(w.x1,0)>=width*0.80 && /[0-9$]/.test(w.text||''));
+      const priceConfidence=priceWords.length ? priceWords.reduce((sum,w)=>sum+num(w.confidence,0),0)/priceWords.length : num(line.confidence,0);
+      out.push({...line,price:parsed.value,priceConfidence,source});
+    }
+    return out;
+  }
+
+  function parseScreenshotLayout(fullLines, priceLines, width, height, store) {
+    if (!width || !height) return [];
+    const candidates=[
+      ...screenshotPriceCandidates(fullLines,width,'full'),
+      ...screenshotPriceCandidates(priceLines,width,'price')
+    ].sort((a,b)=>lineCenterY(a)-lineCenterY(b));
+
+    const groups=[];
+    for (const candidate of candidates) {
+      const cy=lineCenterY(candidate);
+      const last=groups[groups.length-1];
+      if (!last || cy-lineCenterY(last[last.length-1])>125) groups.push([candidate]);
+      else last.push(candidate);
+    }
+
+    const mainPrices=groups.map(group=>{
+      const minY=Math.min(...group.map(lineCenterY));
+      const topBand=group.filter(c=>lineCenterY(c)<=minY+24);
+      topBand.sort((a,b)=>{
+        const confidenceDelta=num(b.priceConfidence,0)-num(a.priceConfidence,0);
+        if (Math.abs(confidenceDelta)>4) return confidenceDelta;
+        const sourceDelta=(b.source==='price'?1:0)-(a.source==='price'?1:0);
+        if (sourceDelta) return sourceDelta;
+        return confidenceDelta;
+      });
+      return topBand[0];
+    }).sort((a,b)=>lineCenterY(a)-lineCenterY(b));
+
+    const found=[];
+    for (let ix=0;ix<mainPrices.length;ix++) {
+      const priceLine=mainPrices[ix];
+      const py=lineCenterY(priceLine);
+      const nextY=ix+1<mainPrices.length ? lineCenterY(mainPrices[ix+1]) : height+400;
+
+      const collectName=(windowSize)=>{
+        const parts=[];
+        for (const line of fullLines) {
+          const cy=lineCenterY(line);
+          if (cy<py-windowSize || cy>py+windowSize) continue;
+          if (num(line.x1,0)<width*0.22 || num(line.x0,0)>width*0.88) continue;
+          let text=stripScreenPrice(line.text);
+          if (!text || isOcrNoise(text)) continue;
+          if (num(line.confidence,0)<65) continue;
+          if (/\b(?:order|items shopped)\b/i.test(text)) continue;
+          if ((text.match(/[a-z]/gi)||[]).length<3) continue;
+          if (text.length>180) continue;
+          parts.push({cy,text});
+        }
+        const unique=[];
+        const seen=new Set();
+        for (const part of parts.sort((a,b)=>a.cy-b.cy)) {
+          const key=part.text.toLowerCase();
+          if (!seen.has(key)) { seen.add(key); unique.push(part.text); }
+        }
+        return normalizeOcrLine(unique.join(' '));
+      };
+
+      let name=collectName(82);
+      if (!name || name.length<5) name=collectName(120);
+      name=name.replace(/^[•·\-–—=°*\s]+|[•·\-–—=°*\s]+$/g,'').trim();
+      if (!name || isOcrNoise(name)) continue;
+
+      const regionEnd=Math.min(py+460,(py+nextY)/2+110);
+      let qty=1, qtyDetected=false;
+      for (const line of fullLines) {
+        const cy=lineCenterY(line);
+        if (cy<py-35 || cy>regionEnd) continue;
+        if (/multipack\s+quantity/i.test(line.text)) continue;
+        const qtyMatch=line.text.match(/(?:^|[^a-z])qty\s*[:x-]?\s*(\d{1,2})\b/i);
+        if (qtyMatch) {
+          qty=Math.max(1,Math.min(99,Math.round(num(qtyMatch[1],1))));
+          qtyDetected=true;
+          break;
+        }
+      }
+
+      let unitPrice=null;
+      if (qty>1) {
+        for (const line of [...priceLines,...fullLines]) {
+          const cy=lineCenterY(line);
+          if (cy<py || cy>Math.min(py+185,regionEnd) || num(line.x1,0)<width*0.80) continue;
+          const each=line.text.match(/\$\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\s*(?:ea|each)\b/i);
+          if (!each) continue;
+          const value=num(`${each[1]}.${each[2]}`,0);
+          if (value>0 && Math.abs(value*qty-priceLine.price)<=0.06) { unitPrice=value; break; }
+        }
+      }
+      if (unitPrice==null) unitPrice=Math.round((priceLine.price/qty)*100)/100;
+
+      if (!Number.isFinite(unitPrice) || unitPrice<=0 || unitPrice>200) continue;
+      found.push({
+        id:uid(),name,qty,unitPrice,
+        category:suggestCategory(store,name),picked:false,_qtyDetected:qtyDetected
+      });
+    }
+    return found;
+  }
+
   function parseScreenshotText(text, store) {
+    // Conservative fallback for browsers where structured OCR blocks are unavailable.
+    // Requires an explicit dollar-and-cents price and never accepts whole numbers as prices.
     const lines=String(text||'').split(/\r?\n/).map(normalizeOcrLine).filter(Boolean);
     const found=[];
-    const totalWords=/\b(subtotal|estimated total|order total|checkout|tax|savings|total items|cart total)\b/i;
-
     for (let i=0;i<lines.length;i++) {
       const price=extractPrice(lines[i]);
-      if (price == null || price <= 0 || totalWords.test(lines[i])) continue;
-
+      if (price==null || price<=0 || price>200 || isOcrNoise(lines[i])) continue;
       let name='';
-      for (let j=i-1;j>=0 && j>=i-6;j--) {
-        const line=lines[j];
-        if (extractPrice(line) != null) continue;
-        if (isOcrNoise(line)) continue;
-        if (/^(qty|quantity)\b/i.test(line)) continue;
-        const letters=(line.match(/[a-z]/gi)||[]).length;
-        if (letters < 3 || line.length < 4 || line.length > 150) continue;
+      for (let j=i-1;j>=0 && j>=i-3;j--) {
+        const line=stripScreenPrice(lines[j]);
+        if (!line || isOcrNoise(line) || /(?:^|[^a-z])qty\s*\d+/i.test(line)) continue;
+        if ((line.match(/[a-z]/gi)||[]).length<4) continue;
         name=line;
         break;
       }
       if (!name) continue;
-
-      name=name.replace(/\s+/g,' ').trim();
-      name=name.replace(/^[•·\-–—\s]+|[•·\-–—\s]+$/g,'').trim();
-      if (!name || isOcrNoise(name) || totalWords.test(name)) continue;
-
-      let qty=1;
-      let qtyMatch=null;
-      for (let j=i+1;j<=Math.min(lines.length-1,i+6);j++) {
-        const qm=lines[j].match(/\b(?:qty|quantity)\s*[:x-]?\s*(\d{1,2})\b/i);
-        if (qm) { qtyMatch=qm; break; }
-        if (extractPrice(lines[j]) != null) break;
-      }
-      if (!qtyMatch) {
-        for (let j=i-1;j>=Math.max(0,i-3);j--) {
-          const qm=lines[j].match(/\b(?:qty|quantity)\s*[:x-]?\s*(\d{1,2})\b/i);
-          if (qm) { qtyMatch=qm; break; }
-          if (extractPrice(lines[j]) != null) break;
-        }
-      }
-      if (qtyMatch) qty=Math.max(1,Math.min(99,Math.round(num(qtyMatch[1],1))));
-
-      found.push({id:uid(),name,qty,unitPrice:price,category:suggestCategory(store,name),picked:false});
+      found.push({id:uid(),name,qty:1,unitPrice:price,category:suggestCategory(store,name),picked:false});
     }
+    return dedupeScreenshotItems(found);
+  }
 
-    // Cart screenshots often overlap as the user scrolls. Exact-ish item+price matches are treated as the same cart line.
-    const deduped=[];
-    const seen=new Set();
-    for (const item of found) {
-      const key=`${normalizeItemIdentity(item.name)}|${item.unitPrice.toFixed(2)}`;
-      if (!key.startsWith('|') && !seen.has(key)) { seen.add(key); deduped.push(item); }
-    }
-    return deduped;
+  function loadImageFile(file) {
+    return new Promise((resolve,reject)=>{
+      const url=URL.createObjectURL(file);
+      const img=new Image();
+      img.onload=()=>{ URL.revokeObjectURL(url); resolve(img); };
+      img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error('Could not open screenshot')); };
+      img.src=url;
+    });
+  }
+
+  function createPriceColumnCanvas(img) {
+    const width=img.naturalWidth||img.width;
+    const height=img.naturalHeight||img.height;
+    const left=Math.floor(width*0.78);
+    const top=Math.min(300,Math.floor(height*0.12));
+    const cropWidth=Math.max(1,width-left);
+    const cropHeight=Math.max(1,height-top);
+    const scale=2.5;
+    const canvas=document.createElement('canvas');
+    canvas.width=Math.max(1,Math.round(cropWidth*scale));
+    canvas.height=Math.max(1,Math.round(cropHeight*scale));
+    const ctx=canvas.getContext('2d',{alpha:false});
+    ctx.fillStyle='#fff';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.imageSmoothingEnabled=true;
+    ctx.imageSmoothingQuality='high';
+    ctx.drawImage(img,left,top,cropWidth,cropHeight,0,0,canvas.width,canvas.height);
+    return {canvas,left,top,scale};
+  }
+
+  function mapCropLinesToImage(lines,crop) {
+    return (lines||[]).map(line=>({
+      ...line,
+      x0:crop.left+line.x0/crop.scale,
+      x1:crop.left+line.x1/crop.scale,
+      y0:crop.top+line.y0/crop.scale,
+      y1:crop.top+line.y1/crop.scale,
+      words:(line.words||[]).map(w=>({
+        ...w,
+        x0:crop.left+w.x0/crop.scale, x1:crop.left+w.x1/crop.scale,
+        y0:crop.top+w.y0/crop.scale, y1:crop.top+w.y1/crop.scale
+      }))
+    }));
   }
 
   function ensureTesseract() {
@@ -547,7 +763,7 @@
 
     const modal=openModal('Reading cart screenshots', `
       <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'} on this device. The first OCR run needs an internet connection to load the recognition engine.</p>
-      <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Images are not added to your app data.</div></div>
+      <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Using the product layout and the price column separately for a more reliable import.</div></div>
     `);
     const stage=$('#ocrStage',modal), bar=$('#ocrProgress',modal), detail=$('#ocrDetail',modal);
     const safeText=(el,text)=>{ if(el?.isConnected) el.textContent=text; };
@@ -562,21 +778,52 @@
           if (m.status && m.status!=='recognizing text') safeText(detail,m.status);
         }
       });
-      const allText=[];
+
+      const allItems=[];
+      const fallbackText=[];
       for (let ix=0;ix<files.length;ix++) {
         safeText(stage,`Reading screenshot ${ix+1} of ${files.length}`);
-        safeText(detail,files[ix].name || `Screenshot ${ix+1}`);
-        safeWidth(bar,(ix/files.length)*90+5);
-        const result=await worker.recognize(files[ix]);
-        allText.push(result?.data?.text || '');
+        safeText(detail,`${files[ix].name || `Screenshot ${ix+1}`} · product layout`);
+        safeWidth(bar,(ix/files.length)*88+5);
+
+        const img=await loadImageFile(files[ix]);
+        const width=img.naturalWidth||img.width;
+        const height=img.naturalHeight||img.height;
+
+        try {
+          await worker.setParameters({tessedit_pageseg_mode:Tesseract.PSM?.AUTO || '3'});
+        } catch {}
+        const fullResult=await worker.recognize(img, {}, {text:true,blocks:true});
+        const fullLines=flattenOcrBlocks(fullResult?.data?.blocks);
+        fallbackText.push(fullResult?.data?.text||'');
+
+        safeText(detail,`${files[ix].name || `Screenshot ${ix+1}`} · verifying prices`);
+        safeWidth(bar,(ix/files.length)*88+13);
+        const crop=createPriceColumnCanvas(img);
+        try {
+          await worker.setParameters({
+            tessedit_pageseg_mode:Tesseract.PSM?.SINGLE_BLOCK || '6',
+            preserve_interword_spaces:'1'
+          });
+        } catch {}
+        const priceResult=await worker.recognize(crop.canvas, {}, {text:true,blocks:true});
+        const priceLines=mapCropLinesToImage(flattenOcrBlocks(priceResult?.data?.blocks),crop);
+
+        let parsed=[];
+        if (fullLines.length) parsed=parseScreenshotLayout(fullLines,priceLines,width,height,t.store);
+        if (!parsed.length) parsed=parseScreenshotText(fullResult?.data?.text||'',t.store);
+        allItems.push(...parsed);
       }
+
       safeText(stage,'Building grocery list…'); safeWidth(bar,96);
-      const items=parseScreenshotText(allText.join('\n'),t.store);
+      let items=dedupeScreenshotItems(allItems);
+      if (!items.length && fallbackText.length) items=parseScreenshotText(fallbackText.join('\n'),t.store);
+
       if (modal?.isConnected) modal.remove();
       if (!items.length) {
         openModal('No products recognized', `
-          <p>I could read the screenshot text, but I could not confidently pair product names with prices.</p>
-          <p class="small muted">Try screenshots that show the product name and its price together. You can also use Paste cart text as a fallback.</p>
+          <p>I could read the screenshot text, but I could not confidently pair product names with current prices.</p>
+          <p class="small muted">Try screenshots that show the product name and current price together. You can also use Paste cart text as a fallback.</p>
           <button class="btn btn-primary btn-block" id="ocrFallbackPaste">Open paste importer</button>
         `, root => $('#ocrFallbackPaste',root).addEventListener('click',()=>{root.remove();openPasteImportModal();}));
         return;
