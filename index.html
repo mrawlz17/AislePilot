@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>Grocery Companion</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icon-180.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="eyebrow">Two-week shopping planner</div>
+        <h1>Grocery Companion</h1>
+      </div>
+      <button id="installBtn" class="btn btn-secondary hidden" type="button">Install</button>
+    </header>
+
+    <main id="main" class="main-content" aria-live="polite"></main>
+
+    <nav class="bottom-nav" aria-label="Primary navigation">
+      <button class="nav-btn active" data-view="home" type="button"><span>Home</span></button>
+      <button class="nav-btn" data-view="plan" type="button"><span>Plan</span></button>
+      <button class="nav-btn" data-view="shop" type="button"><span>Shop</span></button>
+      <button class="nav-btn" data-view="history" type="button"><span>History</span></button>
+      <button class="nav-btn" data-view="settings" type="button"><span>Settings</span></button>
+    </nav>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <template id="modalTemplate">
+    <div class="modal-backdrop" data-close-modal>
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <h2 id="modalTitle"></h2>
+          <button class="icon-btn" type="button" data-close-modal aria-label="Close">×</button>
+        </div>
+        <div id="modalBody" class="modal-body"></div>
+      </div>
+    </div>
+  </template>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

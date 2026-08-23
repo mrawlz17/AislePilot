@@ -1,0 +1,565 @@
+(() => {
+  'use strict';
+
+  const APP_VERSION = '0.1.0';
+  const STORAGE_KEY = 'grocery-companion-state-v1';
+  const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+  const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const todayISO = () => new Date().toISOString().slice(0,10);
+  const money = (n) => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(n || 0));
+  const num = (value, fallback = 0) => {
+    const n = Number.parseFloat(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+  const escapeHtml = (s) => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+
+  function defaultState() {
+    return {
+      schemaVersion: 1,
+      appVersion: APP_VERSION,
+      activeView: 'home',
+      storeProfiles: {
+        Walmart: { route: [...DEFAULT_CATEGORIES] },
+        "Sam's Club": { route: [...DEFAULT_CATEGORIES] }
+      },
+      currentTrip: null,
+      history: [],
+      itemLibrary: {},
+      settings: { defaultStore: 'Walmart', defaultBudget: 0 }
+    };
+  }
+
+  function sanitizeState(raw) {
+    const base = defaultState();
+    if (!raw || typeof raw !== 'object') return base;
+    const state = { ...base, ...raw };
+    state.storeProfiles = { ...base.storeProfiles, ...(raw.storeProfiles || {}) };
+    for (const store of ['Walmart', "Sam's Club"]) {
+      const route = state.storeProfiles?.[store]?.route;
+      state.storeProfiles[store] = { route: Array.isArray(route) && route.length ? [...new Set(route.map(String))] : [...DEFAULT_CATEGORIES] };
+      if (!state.storeProfiles[store].route.includes('Other')) state.storeProfiles[store].route.push('Other');
+    }
+    state.history = Array.isArray(raw.history) ? raw.history.filter(v => v && typeof v === 'object').map(t => sanitizeTrip(t, true)) : [];
+    state.itemLibrary = raw.itemLibrary && typeof raw.itemLibrary === 'object' ? raw.itemLibrary : {};
+    state.settings = { ...base.settings, ...(raw.settings || {}) };
+    state.currentTrip = raw.currentTrip && typeof raw.currentTrip === 'object' ? sanitizeTrip(raw.currentTrip, false) : null;
+    state.appVersion = APP_VERSION;
+    state.schemaVersion = 1;
+    return state;
+  }
+
+  function sanitizeTrip(t, completed = false) {
+    const trip = {
+      id: String(t?.id || uid()),
+      store: ['Walmart', "Sam's Club"].includes(t?.store) ? t.store : 'Walmart',
+      date: String(t?.date || todayISO()),
+      budget: Math.max(0, num(t?.budget)),
+      status: completed ? 'completed' : (['planning','shopping'].includes(t?.status) ? t.status : 'planning'),
+      items: Array.isArray(t?.items) ? t.items.map(sanitizeItem) : [],
+      actualTotal: t?.actualTotal == null ? null : Math.max(0, num(t.actualTotal))
+    };
+    if (completed && t?.completedAt) trip.completedAt = String(t.completedAt);
+    return trip;
+  }
+
+  function sanitizeItem(item) {
+    return {
+      id: String(item?.id || uid()),
+      name: String(item?.name || '').trim() || 'Unnamed item',
+      qty: Math.max(1, Math.round(num(item?.qty, 1))),
+      unitPrice: Math.max(0, num(item?.unitPrice, 0)),
+      category: String(item?.category || 'Other'),
+      picked: Boolean(item?.picked)
+    };
+  }
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return sanitizeState(raw ? JSON.parse(raw) : null);
+    } catch (err) {
+      console.warn('State load failed; starting clean.', err);
+      return defaultState();
+    }
+  }
+
+  let state = loadState();
+  let deferredInstallPrompt = null;
+
+  function saveState() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      return true;
+    } catch (err) {
+      console.error('State save failed.', err);
+      toast('Could not save changes');
+      return false;
+    }
+  }
+
+  function commit(mutator, message) {
+    const snapshot = JSON.stringify(state);
+    try {
+      mutator(state);
+      if (!saveState()) throw new Error('Save failed');
+      render();
+      if (message) toast(message);
+    } catch (err) {
+      state = sanitizeState(JSON.parse(snapshot));
+      console.error(err);
+      toast('Change was not saved');
+    }
+  }
+
+  function toast(text) {
+    const el = $('#toast');
+    el.textContent = text;
+    el.classList.remove('hidden');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => el.classList.add('hidden'), 1800);
+  }
+
+  function tripTotal(trip = state.currentTrip) {
+    return trip ? trip.items.reduce((sum, i) => sum + (i.qty * i.unitPrice), 0) : 0;
+  }
+  function pickedTotal(trip = state.currentTrip) {
+    return trip ? trip.items.filter(i=>i.picked).reduce((sum,i)=>sum+(i.qty*i.unitPrice),0) : 0;
+  }
+  function pickedCount(trip = state.currentTrip) { return trip ? trip.items.filter(i=>i.picked).length : 0; }
+
+  function categoryOptions(store, selected) {
+    const route = state.storeProfiles[store]?.route || DEFAULT_CATEGORIES;
+    return route.map(c => `<option value="${escapeHtml(c)}" ${c===selected?'selected':''}>${escapeHtml(c)}</option>`).join('');
+  }
+
+  function routeIndex(store, category) {
+    const route = state.storeProfiles[store]?.route || DEFAULT_CATEGORIES;
+    const ix = route.indexOf(category);
+    return ix < 0 ? route.length : ix;
+  }
+
+  function sortItemsForStore(items, store) {
+    return [...items].sort((a,b) => {
+      const c = routeIndex(store,a.category)-routeIndex(store,b.category);
+      return c || a.name.localeCompare(b.name);
+    });
+  }
+
+  function libraryKey(store, name) { return `${store}::${name.trim().toLowerCase()}`; }
+  function suggestCategory(store, name) {
+    const saved = state.itemLibrary[libraryKey(store,name)];
+    if (saved?.category) return saved.category;
+    const n = name.toLowerCase();
+    const rules = [
+      [['banana','apple','lettuce','tomato','onion','potato','avocado','berry','berries','grape','orange','fruit','vegetable'], 'Produce'],
+      [['bread','bun','roll','tortilla','bagel','muffin'], 'Bakery'],
+      [['chicken','beef','steak','pork','bacon','sausage','turkey','ham','meat'], 'Meat'],
+      [['milk','egg','cheese','yogurt','butter','cream'], 'Dairy'],
+      [['frozen','pizza','ice cream','fries','waffle'], 'Frozen'],
+      [['soda','water','juice','gatorade','drink','coffee'], 'Drinks'],
+      [['detergent','paper towel','toilet paper','trash bag','dish soap','cleaner'], 'Household'],
+      [['shampoo','soap','toothpaste','deodorant','razor'], 'Personal Care']
+    ];
+    for (const [terms, category] of rules) if (terms.some(t=>n.includes(t))) return category;
+    return 'Pantry';
+  }
+
+  function setView(view) {
+    state.activeView = view;
+    saveState();
+    render();
+  }
+
+  function render() {
+    const view = state.activeView || 'home';
+    $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view===view));
+    const main = $('#main');
+    const renderer = { home: renderHome, plan: renderPlan, shop: renderShop, history: renderHistory, settings: renderSettings }[view] || renderHome;
+    main.innerHTML = renderer();
+    bindViewEvents(view);
+  }
+
+  function renderHome() {
+    const t = state.currentTrip;
+    const last = state.history[0];
+    return `
+      <section class="card">
+        <h2>${t ? 'Current trip' : 'Start your next trip'}</h2>
+        ${t ? `
+          <div class="grid-2">
+            <div><span class="badge">${escapeHtml(t.store)}</span><div class="small muted" style="margin-top:8px">${escapeHtml(t.date)}</div></div>
+            <div class="metric"><div class="label">Projected total</div><div class="value">${money(tripTotal(t))}</div></div>
+          </div>
+          <div class="metric-grid" style="margin-top:10px">
+            <div class="metric ${tripTotal(t) <= t.budget || !t.budget ? 'good':'danger'}"><div class="label">Budget</div><div class="value">${money(t.budget)}</div></div>
+            <div class="metric"><div class="label">Items</div><div class="value">${t.items.length}</div></div>
+          </div>
+          <div class="btn-row" style="margin-top:14px">
+            <button class="btn btn-primary" data-home-action="continue">${t.status==='shopping'?'Continue shopping':'Open plan'}</button>
+            <button class="btn btn-secondary" data-home-action="new">Start over</button>
+          </div>
+        ` : `
+          <p class="muted">Build a budgeted Walmart or Sam's Club trip, then shop it in your actual store-route order.</p>
+          <button class="btn btn-primary btn-block" data-home-action="new">New grocery trip</button>
+        `}
+      </section>
+
+      <section class="card">
+        <h2>How V1 works</h2>
+        <div class="list small">
+          <div>1. Set store and budget.</div>
+          <div>2. Add or paste cart items.</div>
+          <div>3. Confirm categories and prices.</div>
+          <div>4. Shop in your saved store route.</div>
+          <div>5. Save the completed trip to history.</div>
+        </div>
+      </section>
+
+      ${last ? `<section class="card"><h2>Last completed trip</h2><div class="history-row"><div><strong>${escapeHtml(last.store)}</strong><div class="small muted">${escapeHtml(last.date)} · ${last.items.length} items</div></div><strong>${money(last.actualTotal ?? tripTotal(last))}</strong></div></section>` : ''}
+    `;
+  }
+
+  function renderPlan() {
+    const t = state.currentTrip;
+    if (!t) return `<section class="card empty"><strong>No active trip</strong>Create a trip from Home to begin.<br><br><button class="btn btn-primary" data-plan-action="new">Start a trip</button></section>`;
+    const total = tripTotal(t);
+    const cushion = t.budget - total;
+    const items = sortItemsForStore(t.items,t.store);
+    return `
+      <section class="card">
+        <h2>Trip setup</h2>
+        <div class="grid-2">
+          <div class="field"><label>Store</label><select id="tripStore"><option ${t.store==='Walmart'?'selected':''}>Walmart</option><option ${t.store==="Sam's Club"?'selected':''}>Sam's Club</option></select></div>
+          <div class="field"><label>Trip date</label><input id="tripDate" type="date" value="${escapeHtml(t.date)}"></div>
+        </div>
+        <div class="field"><label>Budget</label><input id="tripBudget" type="number" min="0" step="0.01" inputmode="decimal" value="${t.budget || ''}" placeholder="0.00"></div>
+        <div class="metric-grid">
+          <div class="metric"><div class="label">Projected</div><div class="value">${money(total)}</div></div>
+          <div class="metric ${!t.budget || cushion>=0?'good':'danger'}"><div class="label">${!t.budget?'Budget status':(cushion>=0?'Budget cushion':'Over budget')}</div><div class="value">${!t.budget?'Not set':money(Math.abs(cushion))}</div></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Add items</h2>
+        <div class="btn-row">
+          <button class="btn btn-primary" data-plan-action="add">Add item</button>
+          <button class="btn btn-secondary" data-plan-action="paste">Paste cart text</button>
+        </div>
+        <p class="import-note" style="margin-bottom:0">Screenshot OCR is intentionally not part of the core V1 yet. The shopping/budget workflow stays fully usable if import automation fails or changes later.</p>
+      </section>
+
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><h2 style="margin:0">Items</h2><span class="badge">${t.items.length}</span></div>
+        ${items.length ? `<div class="list" style="margin-top:12px">${items.map(renderPlanItem).join('')}</div>` : `<div class="empty"><strong>No items yet</strong>Add a product or paste cart text.</div>`}
+      </section>
+
+      <section class="card">
+        <button class="btn btn-primary btn-block" data-plan-action="shop" ${t.items.length?'':'disabled'}>Start shopping</button>
+      </section>
+    `;
+  }
+
+  function renderPlanItem(i) {
+    return `<div class="item-row" data-item-id="${i.id}"><div><div class="item-name">${escapeHtml(i.name)}</div><div class="item-meta">${i.qty} × ${money(i.unitPrice)} · ${escapeHtml(i.category)} · ${money(i.qty*i.unitPrice)}</div></div><div class="item-actions"><button class="icon-btn" type="button" data-edit-item="${i.id}" aria-label="Edit">✎</button><button class="icon-btn" type="button" data-delete-item="${i.id}" aria-label="Delete">×</button></div></div>`;
+  }
+
+  function renderShop() {
+    const t = state.currentTrip;
+    if (!t) return `<section class="card empty"><strong>No active trip</strong>Create a trip first.</section>`;
+    if (!t.items.length) return `<section class="card empty"><strong>Your list is empty</strong>Add items in Plan before shopping.<br><br><button class="btn btn-primary" data-shop-action="plan">Go to Plan</button></section>`;
+    const items = sortItemsForStore(t.items,t.store);
+    const grouped = new Map();
+    for (const item of items) {
+      if (!grouped.has(item.category)) grouped.set(item.category, []);
+      grouped.get(item.category).push(item);
+    }
+    const count = pickedCount(t);
+    const pct = t.items.length ? Math.round((count/t.items.length)*100) : 0;
+    const total = tripTotal(t);
+    const remaining = total - pickedTotal(t);
+    return `
+      <div class="shop-progress">
+        <section class="card" style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><span class="badge">${escapeHtml(t.store)}</span><div class="small muted" style="margin-top:6px">${count} of ${t.items.length} items</div></div><strong>${pct}%</strong></div>
+          <div class="progress-bar" style="margin-top:10px"><div class="progress-fill" style="width:${pct}%"></div></div>
+          <div class="metric-grid" style="margin-top:10px"><div class="metric"><div class="label">Picked up</div><div class="value">${money(pickedTotal(t))}</div></div><div class="metric"><div class="label">Remaining</div><div class="value">${money(remaining)}</div></div></div>
+        </section>
+      </div>
+      ${[...grouped.entries()].map(([cat, catItems]) => `<div class="category-header"><span>${escapeHtml(cat)}</span><span>${catItems.filter(i=>i.picked).length}/${catItems.length}</span></div>${catItems.map(renderShopItem).join('')}`).join('')}
+      <section class="card" style="margin-top:18px">
+        <div class="metric-grid"><div class="metric"><div class="label">Projected checkout</div><div class="value">${money(total)}</div></div><div class="metric ${!t.budget || total<=t.budget?'good':'danger'}"><div class="label">Budget</div><div class="value">${money(t.budget)}</div></div></div>
+        <button class="btn btn-primary btn-block" style="margin-top:12px" data-shop-action="finish">Finish trip</button>
+        <button class="btn btn-secondary btn-block" style="margin-top:8px" data-shop-action="plan">Back to Plan</button>
+      </section>
+    `;
+  }
+
+  function renderShopItem(i) {
+    return `<div class="shop-item ${i.picked?'picked':''}"><button class="shop-check" data-toggle-picked="${i.id}" type="button" aria-label="${i.picked?'Mark not picked':'Mark picked'}">${i.picked?'✓':''}</button><div><div class="item-name">${escapeHtml(i.name)}</div><div class="item-meta">${i.qty} × ${money(i.unitPrice)} · ${money(i.qty*i.unitPrice)}</div></div><strong>${money(i.qty*i.unitPrice)}</strong></div>`;
+  }
+
+  function renderHistory() {
+    if (!state.history.length) return `<section class="card empty"><strong>No completed trips yet</strong>Your finished Walmart and Sam's Club trips will appear here.</section>`;
+    return `<section class="card"><h2>Completed trips</h2>${state.history.map(t => `<div class="history-row"><div><strong>${escapeHtml(t.store)}</strong><div class="small muted">${escapeHtml(t.date)} · ${t.items.length} items · Budget ${money(t.budget)}</div></div><div style="text-align:right"><strong>${money(t.actualTotal ?? tripTotal(t))}</strong><div><button class="btn btn-secondary small" data-view-history="${t.id}" type="button">View</button></div></div></div>`).join('')}</section>`;
+  }
+
+  function renderSettings() {
+    return `
+      <section class="card">
+        <h2>Defaults</h2>
+        <div class="field"><label>Default store</label><select id="defaultStore"><option ${state.settings.defaultStore==='Walmart'?'selected':''}>Walmart</option><option ${state.settings.defaultStore==="Sam's Club"?'selected':''}>Sam's Club</option></select></div>
+        <div class="field"><label>Default two-week budget</label><input id="defaultBudget" type="number" min="0" step="0.01" inputmode="decimal" value="${state.settings.defaultBudget || ''}" placeholder="0.00"></div>
+      </section>
+      ${['Walmart',"Sam's Club"].map(store => `<section class="card"><h2>${escapeHtml(store)} store route</h2><p class="muted small">Move categories into the order you normally walk this store.</p><div>${state.storeProfiles[store].route.map((cat,ix,arr)=>`<div class="route-row"><strong>${ix+1}. ${escapeHtml(cat)}</strong><div class="route-actions"><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="up" ${ix===0?'disabled':''}>↑</button><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="down" ${ix===arr.length-1?'disabled':''}>↓</button></div></div>`).join('')}</div></section>`).join('')}
+      <section class="card">
+        <h2>Data</h2>
+        <p class="muted small">Everything is stored locally in this browser. Export a backup before clearing browser data or changing devices.</p>
+        <div class="btn-row"><button class="btn btn-secondary" data-settings-action="export">Export backup</button><label class="btn btn-secondary" style="display:inline-flex;align-items:center">Import backup<input id="backupImport" type="file" accept="application/json" hidden></label><button class="btn btn-danger" data-settings-action="reset">Reset app</button></div>
+        <p class="small muted" style="margin-bottom:0">Version ${APP_VERSION}</p>
+      </section>
+    `;
+  }
+
+  function bindViewEvents(view) {
+    if (view === 'home') {
+      $$('[data-home-action]').forEach(b => b.addEventListener('click', () => {
+        if (b.dataset.homeAction==='new') return newTripFlow();
+        if (b.dataset.homeAction==='continue') return setView(state.currentTrip?.status==='shopping'?'shop':'plan');
+      }));
+    }
+    if (view === 'plan') {
+      $('[data-plan-action="new"]')?.addEventListener('click', newTripFlow);
+      $('#tripStore')?.addEventListener('change', e => commit(s => { s.currentTrip.store = e.target.value; s.currentTrip.items.forEach(i => { if (!s.storeProfiles[e.target.value].route.includes(i.category)) i.category='Other'; }); }, 'Store updated'));
+      $('#tripDate')?.addEventListener('change', e => commit(s => s.currentTrip.date = e.target.value || todayISO()));
+      $('#tripBudget')?.addEventListener('change', e => commit(s => s.currentTrip.budget = Math.max(0,num(e.target.value))));
+      $('[data-plan-action="add"]')?.addEventListener('click', () => openItemModal());
+      $('[data-plan-action="paste"]')?.addEventListener('click', openPasteImportModal);
+      $('[data-plan-action="shop"]')?.addEventListener('click', () => commit(s => { s.currentTrip.status='shopping'; s.activeView='shop'; }));
+      $$('[data-edit-item]').forEach(b => b.addEventListener('click', () => openItemModal(b.dataset.editItem)));
+      $$('[data-delete-item]').forEach(b => b.addEventListener('click', () => deleteItem(b.dataset.deleteItem)));
+    }
+    if (view === 'shop') {
+      $$('[data-toggle-picked]').forEach(b => b.addEventListener('click', () => commit(s => {
+        const item=s.currentTrip.items.find(i=>i.id===b.dataset.togglePicked); if(item) item.picked=!item.picked;
+      })));
+      $('[data-shop-action="plan"]')?.addEventListener('click', () => commit(s => { s.currentTrip.status='planning'; s.activeView='plan'; }));
+      $('[data-shop-action="finish"]')?.addEventListener('click', openFinishModal);
+    }
+    if (view === 'history') {
+      $$('[data-view-history]').forEach(b => b.addEventListener('click', () => openHistoryModal(b.dataset.viewHistory)));
+    }
+    if (view === 'settings') {
+      $('#defaultStore')?.addEventListener('change', e => commit(s => s.settings.defaultStore=e.target.value));
+      $('#defaultBudget')?.addEventListener('change', e => commit(s => s.settings.defaultBudget=Math.max(0,num(e.target.value))));
+      $$('[data-route-dir]').forEach(b => b.addEventListener('click', () => moveRoute(b.dataset.routeStore, Number(b.dataset.routeIndex), b.dataset.routeDir)));
+      $('[data-settings-action="export"]')?.addEventListener('click', exportBackup);
+      $('[data-settings-action="reset"]')?.addEventListener('click', resetApp);
+      $('#backupImport')?.addEventListener('change', importBackup);
+    }
+  }
+
+  function newTripFlow() {
+    if (state.currentTrip && !confirm('Replace the current trip? The existing active trip will be discarded.')) return;
+    commit(s => {
+      s.currentTrip = { id: uid(), store: s.settings.defaultStore || 'Walmart', date: todayISO(), budget: num(s.settings.defaultBudget), status:'planning', items:[], actualTotal:null };
+      s.activeView='plan';
+    }, 'New trip started');
+  }
+
+  function openModal(title, bodyHtml, onReady) {
+    const tpl = $('#modalTemplate').content.cloneNode(true);
+    const backdrop = tpl.querySelector('.modal-backdrop');
+    tpl.querySelector('#modalTitle').textContent = title;
+    tpl.querySelector('#modalBody').innerHTML = bodyHtml;
+    document.body.appendChild(tpl);
+    const live = document.body.lastElementChild;
+    live.addEventListener('click', e => {
+      if (e.target.matches('[data-close-modal]')) live.remove();
+    });
+    onReady?.(live);
+    return live;
+  }
+
+  function openItemModal(itemId) {
+    const t = state.currentTrip;
+    if (!t) return;
+    const existing = itemId ? t.items.find(i=>i.id===itemId) : null;
+    const modal = openModal(existing?'Edit item':'Add item', `
+      <div class="field"><label>Item name</label><input id="itemName" value="${escapeHtml(existing?.name || '')}" autocomplete="off"></div>
+      <div class="grid-2"><div class="field"><label>Quantity</label><input id="itemQty" type="number" min="1" step="1" inputmode="numeric" value="${existing?.qty || 1}"></div><div class="field"><label>Unit price</label><input id="itemPrice" type="number" min="0" step="0.01" inputmode="decimal" value="${existing?.unitPrice ?? ''}" placeholder="0.00"></div></div>
+      <div class="field"><label>Category</label><select id="itemCategory">${categoryOptions(t.store, existing?.category || 'Other')}</select></div>
+      <button class="btn btn-primary btn-block" id="saveItem">Save item</button>
+    `, root => {
+      const nameEl = $('#itemName',root); const catEl=$('#itemCategory',root);
+      if (!existing) nameEl.addEventListener('blur', () => { if(nameEl.value.trim()) catEl.value=suggestCategory(t.store,nameEl.value.trim()); });
+      $('#saveItem',root).addEventListener('click', () => {
+        const name=nameEl.value.trim(); if(!name) return toast('Enter an item name');
+        const qty=Math.max(1,Math.round(num($('#itemQty',root).value,1)));
+        const unitPrice=Math.max(0,num($('#itemPrice',root).value));
+        const category=catEl.value;
+        commit(s => {
+          if (existing) {
+            const i=s.currentTrip.items.find(x=>x.id===existing.id); Object.assign(i,{name,qty,unitPrice,category});
+          } else s.currentTrip.items.push({id:uid(),name,qty,unitPrice,category,picked:false});
+          s.itemLibrary[libraryKey(s.currentTrip.store,name)]={category,lastPrice:unitPrice};
+        }, existing?'Item updated':'Item added');
+        root.remove();
+      });
+      setTimeout(()=>nameEl.focus(),50);
+    });
+    return modal;
+  }
+
+  function deleteItem(id) {
+    const item=state.currentTrip?.items.find(i=>i.id===id); if(!item) return;
+    if (!confirm(`Delete “${item.name}”?`)) return;
+    commit(s => s.currentTrip.items = s.currentTrip.items.filter(i=>i.id!==id), 'Item deleted');
+  }
+
+  function parseCartText(text, store) {
+    // Reliability-first parser: accepts one item per line. Examples:
+    // Milk | 2 | 3.48
+    // Milk, 2, 3.48
+    // Milk - $3.48
+    const out=[];
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line=rawLine.trim(); if(!line) continue;
+      let name=line, qty=1, price=0;
+      const pipe=line.split('|').map(s=>s.trim());
+      const comma=line.split(',').map(s=>s.trim());
+      if (pipe.length>=2) {
+        name=pipe[0]; qty=Math.max(1,Math.round(num(pipe[1],1))); price=Math.max(0,num(String(pipe[2]??'').replace(/[$]/g,''),0));
+      } else if (comma.length>=2 && /^\s*\d+(?:\.\d+)?\s*$/.test(comma[1].replace('$',''))) {
+        name=comma[0];
+        if (comma.length>=3) { qty=Math.max(1,Math.round(num(comma[1],1))); price=Math.max(0,num(comma[2].replace('$',''),0)); }
+        else price=Math.max(0,num(comma[1].replace('$',''),0));
+      } else {
+        const m=line.match(/^(.*?)\s+(?:-|—)?\s*\$([0-9]+(?:\.[0-9]{1,2})?)\s*$/);
+        if(m){ name=m[1].trim(); price=num(m[2]); }
+      }
+      if(!name) continue;
+      out.push({id:uid(),name,qty,unitPrice:price,category:suggestCategory(store,name),picked:false});
+    }
+    return out;
+  }
+
+  function openPasteImportModal() {
+    const t=state.currentTrip; if(!t) return;
+    openModal('Paste cart text', `
+      <p class="small muted">Use one product per line. Most reliable formats:</p>
+      <div class="import-note">Milk | 2 | 3.48<br>Bananas | 1 | 2.16<br>Paper Towels - $18.98</div>
+      <div class="field" style="margin-top:12px"><label>Cart text</label><textarea id="pasteText" placeholder="Paste or type items here"></textarea></div>
+      <button class="btn btn-primary btn-block" id="reviewImport">Review import</button>
+    `, root => $('#reviewImport',root).addEventListener('click', () => {
+      const items=parseCartText($('#pasteText',root).value,t.store);
+      if(!items.length) return toast('No items found');
+      root.remove();
+      openImportReview(items);
+    }));
+  }
+
+  function openImportReview(items) {
+    const t=state.currentTrip;
+    openModal('Review import', `
+      <p class="small muted">Nothing is added until you confirm. Correct any item that was parsed incorrectly.</p>
+      <div id="importRows" class="list">${items.map((i,ix)=>`<div class="card" style="margin:0"><div class="field"><label>Item</label><input data-import-name="${ix}" value="${escapeHtml(i.name)}"></div><div class="grid-2"><div class="field"><label>Qty</label><input data-import-qty="${ix}" type="number" min="1" step="1" value="${i.qty}"></div><div class="field"><label>Unit price</label><input data-import-price="${ix}" type="number" min="0" step="0.01" value="${i.unitPrice || ''}"></div></div><div class="field"><label>Category</label><select data-import-cat="${ix}">${categoryOptions(t.store,i.category)}</select></div></div>`).join('')}</div>
+      <button class="btn btn-primary btn-block" id="confirmImport" style="margin-top:12px">Add ${items.length} items</button>
+    `, root => $('#confirmImport',root).addEventListener('click', () => {
+      const cleaned=items.map((i,ix)=>({
+        id:i.id,
+        name:$(`[data-import-name="${ix}"]`,root).value.trim(),
+        qty:Math.max(1,Math.round(num($(`[data-import-qty="${ix}"]`,root).value,1))),
+        unitPrice:Math.max(0,num($(`[data-import-price="${ix}"]`,root).value)),
+        category:$(`[data-import-cat="${ix}"]`,root).value,
+        picked:false
+      })).filter(i=>i.name);
+      commit(s => {
+        for(const item of cleaned){ s.currentTrip.items.push(item); s.itemLibrary[libraryKey(s.currentTrip.store,item.name)]={category:item.category,lastPrice:item.unitPrice}; }
+      }, `${cleaned.length} items added`);
+      root.remove();
+    }));
+  }
+
+  function openFinishModal() {
+    const t=state.currentTrip; if(!t) return;
+    const projected=tripTotal(t);
+    openModal('Finish trip', `
+      <div class="metric-grid"><div class="metric"><div class="label">Projected</div><div class="value">${money(projected)}</div></div><div class="metric"><div class="label">Budget</div><div class="value">${money(t.budget)}</div></div></div>
+      <div class="field" style="margin-top:14px"><label>Actual checkout total (optional)</label><input id="actualTotal" type="number" min="0" step="0.01" inputmode="decimal" placeholder="${projected.toFixed(2)}"></div>
+      <p class="small muted">This saves a completed copy to History and clears the active trip.</p>
+      <button class="btn btn-primary btn-block" id="finishTrip">Save completed trip</button>
+    `, root => $('#finishTrip',root).addEventListener('click', () => {
+      const entered=$('#actualTotal',root).value.trim();
+      const actual=entered===''?null:Math.max(0,num(entered));
+      commit(s => {
+        const done=JSON.parse(JSON.stringify(s.currentTrip));
+        done.status='completed'; done.actualTotal=actual; done.completedAt=new Date().toISOString();
+        s.history.unshift(done);
+        s.currentTrip=null; s.activeView='history';
+      }, 'Trip saved');
+      root.remove();
+    }));
+  }
+
+  function openHistoryModal(id) {
+    const t=state.history.find(x=>x.id===id); if(!t) return;
+    openModal(`${t.store} · ${t.date}`, `
+      <div class="metric-grid"><div class="metric"><div class="label">Budget</div><div class="value">${money(t.budget)}</div></div><div class="metric"><div class="label">Actual</div><div class="value">${money(t.actualTotal ?? tripTotal(t))}</div></div></div>
+      <div style="margin-top:14px">${sortItemsForStore(t.items,t.store).map(i=>`<div class="history-row"><div><strong>${escapeHtml(i.name)}</strong><div class="small muted">${i.qty} × ${money(i.unitPrice)} · ${escapeHtml(i.category)}</div></div><strong>${money(i.qty*i.unitPrice)}</strong></div>`).join('')}</div>
+    `);
+  }
+
+  function moveRoute(store,index,dir) {
+    commit(s => {
+      const arr=s.storeProfiles[store].route;
+      const target=dir==='up'?index-1:index+1;
+      if(target<0||target>=arr.length) return;
+      [arr[index],arr[target]]=[arr[target],arr[index]];
+    });
+  }
+
+  function exportBackup() {
+    const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob); const a=document.createElement('a');
+    a.href=url; a.download=`grocery-companion-backup-${todayISO()}.json`; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),500); toast('Backup exported');
+  }
+
+  async function importBackup(e) {
+    const file=e.target.files?.[0]; if(!file) return;
+    try {
+      const raw=JSON.parse(await file.text());
+      const next=sanitizeState(raw);
+      if(!confirm('Replace current app data with this backup?')) return;
+      state=next; saveState(); render(); toast('Backup imported');
+    } catch { toast('Backup file is invalid'); }
+    e.target.value='';
+  }
+
+  function resetApp() {
+    if(!confirm('Reset all Grocery Companion data on this device? This cannot be undone unless you exported a backup.')) return;
+    state=defaultState(); saveState(); render(); toast('App reset');
+  }
+
+  // Global nav
+  $$('.nav-btn').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+
+  // Install prompt when supported.
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault(); deferredInstallPrompt=e; $('#installBtn').classList.remove('hidden');
+  });
+  $('#installBtn').addEventListener('click', async () => {
+    if(!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt(); await deferredInstallPrompt.userChoice; deferredInstallPrompt=null; $('#installBtn').classList.add('hidden');
+  });
+
+  // Service worker registration is best-effort; app remains usable without it.
+  if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW unavailable',err)));
+
+  render();
+})();
