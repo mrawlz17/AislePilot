@@ -250,3 +250,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
 
 .history-row { display:grid; grid-template-columns: minmax(0,1fr) auto; gap:8px; align-items:center; padding:12px 0; border-bottom:1px solid var(--line); }
 .history-row:last-child { border-bottom:0; }
+
+.ocr-status { padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--surface-2); }
+.include-row { display:flex; gap:9px; align-items:center; margin-bottom:12px; font-size:14px; }
+.include-row input { width:20px; height:20px; }

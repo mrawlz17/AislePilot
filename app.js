@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.1.0';
+  const APP_VERSION = '0.2.0';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
 
@@ -213,8 +213,8 @@
         <h2>How V1 works</h2>
         <div class="list small">
           <div>1. Set store and budget.</div>
-          <div>2. Add or paste cart items.</div>
-          <div>3. Confirm categories and prices.</div>
+          <div>2. Upload Walmart/Sam's cart screenshots.</div>
+          <div>3. Review OCR results, categories, and prices.</div>
           <div>4. Shop in your saved store route.</div>
           <div>5. Save the completed trip to history.</div>
         </div>
@@ -247,15 +247,16 @@
       <section class="card">
         <h2>Add items</h2>
         <div class="btn-row">
-          <button class="btn btn-primary" data-plan-action="add">Add item</button>
+          <label class="btn btn-primary" style="display:inline-flex;align-items:center;justify-content:center">Upload cart screenshots<input id="cartScreenshots" type="file" accept="image/*" multiple hidden></label>
+          <button class="btn btn-secondary" data-plan-action="add">Add item</button>
           <button class="btn btn-secondary" data-plan-action="paste">Paste cart text</button>
         </div>
-        <p class="import-note" style="margin-bottom:0">Screenshot OCR is intentionally not part of the core V1 yet. The shopping/budget workflow stays fully usable if import automation fails or changes later.</p>
+        <p class="import-note" style="margin-bottom:0">Upload one or more screenshots from the Walmart or Sam's Club cart. The app reads them, removes likely overlap duplicates, and requires a review before adding anything to your list.</p>
       </section>
 
       <section class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><h2 style="margin:0">Items</h2><span class="badge">${t.items.length}</span></div>
-        ${items.length ? `<div class="list" style="margin-top:12px">${items.map(renderPlanItem).join('')}</div>` : `<div class="empty"><strong>No items yet</strong>Add a product or paste cart text.</div>`}
+        ${items.length ? `<div class="list" style="margin-top:12px">${items.map(renderPlanItem).join('')}</div>` : `<div class="empty"><strong>No items yet</strong>Upload cart screenshots, add a product, or paste cart text.</div>`}
       </section>
 
       <section class="card">
@@ -339,6 +340,7 @@
       $('#tripBudget')?.addEventListener('change', e => commit(s => s.currentTrip.budget = Math.max(0,num(e.target.value))));
       $('[data-plan-action="add"]')?.addEventListener('click', () => openItemModal());
       $('[data-plan-action="paste"]')?.addEventListener('click', openPasteImportModal);
+      $('#cartScreenshots')?.addEventListener('change', handleScreenshotImport);
       $('[data-plan-action="shop"]')?.addEventListener('click', () => commit(s => { s.currentTrip.status='shopping'; s.activeView='shop'; }));
       $$('[data-edit-item]').forEach(b => b.addEventListener('click', () => openItemModal(b.dataset.editItem)));
       $$('[data-delete-item]').forEach(b => b.addEventListener('click', () => deleteItem(b.dataset.deleteItem)));
@@ -421,6 +423,177 @@
     commit(s => s.currentTrip.items = s.currentTrip.items.filter(i=>i.id!==id), 'Item deleted');
   }
 
+  function normalizeOcrLine(line) {
+    return String(line || '')
+      .replace(/[|]/g, 'I')
+      .replace(/[“”]/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function isOcrNoise(line) {
+    const l=line.toLowerCase();
+    if (!/[a-z]/i.test(line)) return true;
+    const phrases=[
+      'subtotal','estimated total','order total','checkout','tax','savings','you saved','cart summary',
+      'pickup','delivery','shipping','remove','save for later','move to','options','substitution','substitutions',
+      'current price','original price','price when purchased online','price per unit','each','in stock','out of stock',
+      'sold and shipped','fulfilled by','sponsored','add to list','add to cart','continue shopping','search walmart',
+      'search sam','membership','free shipping','protection plan','walmart cash','reorder','buy now'
+    ];
+    return phrases.some(p=>l===p || l.startsWith(p+' ') || l.includes(' '+p+' '));
+  }
+
+  function extractPrice(line) {
+    const raw=String(line).trim();
+    const dollarLike=raw.match(/\$\s*([0-9]{1,4})\s*[.,]\s*([0-9]{2})\b/);
+    if (dollarLike) return num(`${dollarLike[1]}.${dollarLike[2]}`,0);
+    const sLike=raw.match(/^S\s*([0-9]{1,4})\s*[.,]\s*([0-9]{2})\b/i);
+    if (sLike) return num(`${sLike[1]}.${sLike[2]}`,0);
+    const dollarWhole=raw.match(/\$\s*([0-9]{1,4})\b/);
+    if (dollarWhole) return num(dollarWhole[1],0);
+    const exact=raw.match(/^\s*([0-9]{1,4})\s*[.,]\s*([0-9]{2})\s*$/);
+    return exact ? num(`${exact[1]}.${exact[2]}`,0) : null;
+  }
+
+  function normalizeItemIdentity(name) {
+    return String(name).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+  }
+
+  function parseScreenshotText(text, store) {
+    const lines=String(text||'').split(/\r?\n/).map(normalizeOcrLine).filter(Boolean);
+    const found=[];
+    const totalWords=/\b(subtotal|estimated total|order total|checkout|tax|savings|total items|cart total)\b/i;
+
+    for (let i=0;i<lines.length;i++) {
+      const price=extractPrice(lines[i]);
+      if (price == null || price <= 0 || totalWords.test(lines[i])) continue;
+
+      let name='';
+      for (let j=i-1;j>=0 && j>=i-6;j--) {
+        const line=lines[j];
+        if (extractPrice(line) != null) continue;
+        if (isOcrNoise(line)) continue;
+        if (/^(qty|quantity)\b/i.test(line)) continue;
+        const letters=(line.match(/[a-z]/gi)||[]).length;
+        if (letters < 3 || line.length < 4 || line.length > 150) continue;
+        name=line;
+        break;
+      }
+      if (!name) continue;
+
+      name=name.replace(/\s+/g,' ').trim();
+      name=name.replace(/^[•·\-–—\s]+|[•·\-–—\s]+$/g,'').trim();
+      if (!name || isOcrNoise(name) || totalWords.test(name)) continue;
+
+      let qty=1;
+      let qtyMatch=null;
+      for (let j=i+1;j<=Math.min(lines.length-1,i+6);j++) {
+        const qm=lines[j].match(/\b(?:qty|quantity)\s*[:x-]?\s*(\d{1,2})\b/i);
+        if (qm) { qtyMatch=qm; break; }
+        if (extractPrice(lines[j]) != null) break;
+      }
+      if (!qtyMatch) {
+        for (let j=i-1;j>=Math.max(0,i-3);j--) {
+          const qm=lines[j].match(/\b(?:qty|quantity)\s*[:x-]?\s*(\d{1,2})\b/i);
+          if (qm) { qtyMatch=qm; break; }
+          if (extractPrice(lines[j]) != null) break;
+        }
+      }
+      if (qtyMatch) qty=Math.max(1,Math.min(99,Math.round(num(qtyMatch[1],1))));
+
+      found.push({id:uid(),name,qty,unitPrice:price,category:suggestCategory(store,name),picked:false});
+    }
+
+    // Cart screenshots often overlap as the user scrolls. Exact-ish item+price matches are treated as the same cart line.
+    const deduped=[];
+    const seen=new Set();
+    for (const item of found) {
+      const key=`${normalizeItemIdentity(item.name)}|${item.unitPrice.toFixed(2)}`;
+      if (!key.startsWith('|') && !seen.has(key)) { seen.add(key); deduped.push(item); }
+    }
+    return deduped;
+  }
+
+  function ensureTesseract() {
+    if (window.Tesseract?.createWorker) return Promise.resolve(window.Tesseract);
+    return new Promise((resolve,reject) => {
+      const existing=document.querySelector('script[data-ocr-engine]');
+      if (existing) {
+        const started=Date.now();
+        const timer=setInterval(()=>{
+          if (window.Tesseract?.createWorker) { clearInterval(timer); resolve(window.Tesseract); }
+          else if (Date.now()-started>20000) { clearInterval(timer); reject(new Error('OCR engine timed out')); }
+        },100);
+        return;
+      }
+      const script=document.createElement('script');
+      script.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+      script.async=true;
+      script.dataset.ocrEngine='tesseract';
+      script.onload=()=>window.Tesseract?.createWorker ? resolve(window.Tesseract) : reject(new Error('OCR engine unavailable'));
+      script.onerror=()=>reject(new Error('OCR engine download failed'));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function handleScreenshotImport(e) {
+    const input=e.target;
+    const files=[...(input.files||[])].filter(f=>f.type.startsWith('image/'));
+    input.value='';
+    if (!files.length) return;
+    if (files.length>12) return toast('Choose 12 screenshots or fewer');
+    const t=state.currentTrip; if(!t) return;
+
+    const modal=openModal('Reading cart screenshots', `
+      <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'} on this device. The first OCR run needs an internet connection to load the recognition engine.</p>
+      <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Images are not added to your app data.</div></div>
+    `);
+    const stage=$('#ocrStage',modal), bar=$('#ocrProgress',modal), detail=$('#ocrDetail',modal);
+    const safeText=(el,text)=>{ if(el?.isConnected) el.textContent=text; };
+    const safeWidth=(el,pct)=>{ if(el?.isConnected) el.style.width=`${clamp(pct,2,100)}%`; };
+
+    let worker=null;
+    try {
+      safeText(stage,'Loading OCR engine…');
+      const Tesseract=await ensureTesseract();
+      worker=await Tesseract.createWorker('eng', 1, {
+        logger: m => {
+          if (m.status && m.status!=='recognizing text') safeText(detail,m.status);
+        }
+      });
+      const allText=[];
+      for (let ix=0;ix<files.length;ix++) {
+        safeText(stage,`Reading screenshot ${ix+1} of ${files.length}`);
+        safeText(detail,files[ix].name || `Screenshot ${ix+1}`);
+        safeWidth(bar,(ix/files.length)*90+5);
+        const result=await worker.recognize(files[ix]);
+        allText.push(result?.data?.text || '');
+      }
+      safeText(stage,'Building grocery list…'); safeWidth(bar,96);
+      const items=parseScreenshotText(allText.join('\n'),t.store);
+      if (modal?.isConnected) modal.remove();
+      if (!items.length) {
+        openModal('No products recognized', `
+          <p>I could read the screenshot text, but I could not confidently pair product names with prices.</p>
+          <p class="small muted">Try screenshots that show the product name and its price together. You can also use Paste cart text as a fallback.</p>
+          <button class="btn btn-primary btn-block" id="ocrFallbackPaste">Open paste importer</button>
+        `, root => $('#ocrFallbackPaste',root).addEventListener('click',()=>{root.remove();openPasteImportModal();}));
+        return;
+      }
+      openImportReview(items, {source:'screenshots'});
+    } catch (err) {
+      console.error('Screenshot OCR failed',err);
+      if (modal?.isConnected) modal.remove();
+      openModal('Screenshot import unavailable', `
+        <p>The OCR engine could not complete this import.</p>
+        <p class="small muted">Check your internet connection and retry. Your current trip and grocery list were not changed.</p>
+      `);
+    } finally {
+      try { if(worker) await worker.terminate(); } catch {}
+    }
+  }
+
   function parseCartText(text, store) {
     // Reliability-first parser: accepts one item per line. Examples:
     // Milk | 2 | 3.48
@@ -463,21 +636,24 @@
     }));
   }
 
-  function openImportReview(items) {
+  function openImportReview(items, options={}) {
     const t=state.currentTrip;
-    openModal('Review import', `
-      <p class="small muted">Nothing is added until you confirm. Correct any item that was parsed incorrectly.</p>
-      <div id="importRows" class="list">${items.map((i,ix)=>`<div class="card" style="margin:0"><div class="field"><label>Item</label><input data-import-name="${ix}" value="${escapeHtml(i.name)}"></div><div class="grid-2"><div class="field"><label>Qty</label><input data-import-qty="${ix}" type="number" min="1" step="1" value="${i.qty}"></div><div class="field"><label>Unit price</label><input data-import-price="${ix}" type="number" min="0" step="0.01" value="${i.unitPrice || ''}"></div></div><div class="field"><label>Category</label><select data-import-cat="${ix}">${categoryOptions(t.store,i.category)}</select></div></div>`).join('')}</div>
-      <button class="btn btn-primary btn-block" id="confirmImport" style="margin-top:12px">Add ${items.length} items</button>
+    const fromScreenshots=options.source==='screenshots';
+    openModal(fromScreenshots?'Review screenshot import':'Review import', `
+      <p class="small muted">Nothing is added until you confirm. ${fromScreenshots?'OCR can misread product names, quantities, or prices, so check each row.':'Correct any item that was parsed incorrectly.'}</p>
+      <div id="importRows" class="list">${items.map((i,ix)=>`<div class="card" style="margin:0"><label class="include-row"><input data-import-include="${ix}" type="checkbox" checked><strong>Include item</strong></label><div class="field"><label>Item</label><input data-import-name="${ix}" value="${escapeHtml(i.name)}"></div><div class="grid-2"><div class="field"><label>Qty</label><input data-import-qty="${ix}" type="number" min="1" step="1" value="${i.qty}"></div><div class="field"><label>Unit price</label><input data-import-price="${ix}" type="number" min="0" step="0.01" value="${i.unitPrice || ''}"></div></div><div class="field"><label>Category</label><select data-import-cat="${ix}">${categoryOptions(t.store,i.category)}</select></div></div>`).join('')}</div>
+      <button class="btn btn-primary btn-block" id="confirmImport" style="margin-top:12px">Add reviewed items</button>
     `, root => $('#confirmImport',root).addEventListener('click', () => {
       const cleaned=items.map((i,ix)=>({
+        include:$(`[data-import-include="${ix}"]`,root).checked,
         id:i.id,
         name:$(`[data-import-name="${ix}"]`,root).value.trim(),
         qty:Math.max(1,Math.round(num($(`[data-import-qty="${ix}"]`,root).value,1))),
         unitPrice:Math.max(0,num($(`[data-import-price="${ix}"]`,root).value)),
         category:$(`[data-import-cat="${ix}"]`,root).value,
         picked:false
-      })).filter(i=>i.name);
+      })).filter(i=>i.include && i.name).map(({include,...i})=>i);
+      if(!cleaned.length) return toast('Select at least one item');
       commit(s => {
         for(const item of cleaned){ s.currentTrip.items.push(item); s.itemLibrary[libraryKey(s.currentTrip.store,item.name)]={category:item.category,lastPrice:item.unitPrice}; }
       }, `${cleaned.length} items added`);
