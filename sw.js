@@ -1,5 +1,5 @@
-const APP_CACHE='grocery-companion-v0.2.4';
-const OCR_CACHE='grocery-ocr-v0.2.4';
+const APP_CACHE='grocery-companion-v0.2.5';
+const OCR_CACHE='grocery-ocr-v0.2.5';
 const CORE=['./','./index.html','./styles.css','./app.js','./manifest.json','./icon.svg','./icon-180.png','./icon-512.png'];
 
 self.addEventListener('install',event=>event.waitUntil(
@@ -15,7 +15,7 @@ self.addEventListener('activate',event=>event.waitUntil(
 
 self.addEventListener('message',event=>{
   if(event.data?.type==='GET_VERSION' && event.ports?.[0]) {
-    event.ports[0].postMessage({version:'0.2.4'});
+    event.ports[0].postMessage({version:'0.2.5'});
   }
   if(event.data?.type==='SKIP_WAITING') self.skipWaiting();
 });

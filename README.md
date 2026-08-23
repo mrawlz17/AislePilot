@@ -1,4 +1,4 @@
-# Grocery Companion v0.2.4
+# Grocery Companion v0.2.5
 
 A reliability-first local web app for planning and shopping Walmart and Sam's Club grocery trips.
 
@@ -27,21 +27,21 @@ Select one or more Walmart or Sam's Club cart screenshots. Grocery Companion OCR
 
 The parser is designed to ignore unit-price text, crossed-out old prices, savings amounts, order headers, and quantity metadata that should not become grocery items.
 
-### v0.2.4 iPhone OCR startup change
+### v0.2.5 iPhone OCR startup change
 
-V0.2.4 changes how the OCR runtime is delivered to iPhone Safari:
+V0.2.5 removes the remaining blob-script startup path that could fail with a generic `Load failed` on iPhone Safari:
 
-- The page downloads the OCR library with ordinary CORS fetches instead of asking Safari to execute a cross-origin worker directly.
-- The OCR worker, WebAssembly core loader, and English language model are downloaded first and stored in the app's Cache Storage under Grocery Companion same-origin URLs.
-- The service worker only serves those already-staged local OCR files. It no longer attempts to relay a remote worker/core request while Tesseract is starting.
-- The app verifies the local worker, core, and language files before starting OCR.
-- The app confirms that the **v0.2.4 service worker** is actually controlling the page so an older cached service worker cannot silently run the previous OCR routing logic.
-- The OCR core is deliberately the non-SIMD LSTM build. It is slower than the SIMD build but is the more conservative choice for iPhone/WebKit compatibility.
-- If setup fails, the diagnostic should now name the failing phase/file rather than only showing `Load failed`.
+- The Tesseract API is downloaded as data, stored under a Grocery Companion same-origin URL, verified, and then loaded through a normal same-origin `<script>` request. Safari is no longer asked to execute a dynamically-created `blob:` OCR library.
+- GitHub Raw is the primary pinned source for the Tesseract API, worker, and LSTM core files; CDN sources are secondary fallbacks.
+- The English model uses the official `tessdata_fast` LSTM model and is staged as an uncompressed `.traineddata` file with `gzip:false`.
+- The OCR runtime stages the basic LSTM, SIMD LSTM, and relaxed-SIMD LSTM core variants and gives Tesseract the local core directory so it can select the compatible build.
+- Every staged file is size-checked before `createWorker()` runs.
+- The error dialog records both the **last setup stage** and the actual error. A future failure should therefore identify whether it occurred while downloading, verifying, loading the API, or starting the worker.
+- Grocery/trip data remains untouched until the import review is confirmed.
 
-The first successful OCR setup still requires an internet connection to obtain the pinned OCR runtime. After those files are cached, later imports can reuse them until site data is cleared or the OCR version changes.
+The first OCR setup requires internet access to obtain the OCR runtime. After successful staging, the files are reused from browser Cache Storage until site data is cleared or the app changes OCR versions.
 
-Manual entry and the paste importer remain available as fallbacks. Trip data is never changed until the import review is confirmed.
+Manual entry and the paste importer remain available as fallbacks.
 
 ## Deploy to GitHub Pages
 
@@ -59,7 +59,7 @@ Upload these files to the root of the GitHub repository:
 
 Then enable GitHub Pages for the repository branch/folder containing the files.
 
-After replacing an older Grocery Companion release, reload Safari once and verify **Settings → Version = 0.2.4** before testing screenshot import.
+After replacing an older Grocery Companion release, reload Safari once and verify **Settings → Version = 0.2.5** before testing screenshot import.
 
 ## Data note
 
