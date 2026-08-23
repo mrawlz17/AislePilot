@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.2.1';
+  const APP_VERSION = '0.2.2';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
 
@@ -731,26 +731,95 @@
     }));
   }
 
-  function ensureTesseract() {
-    if (window.Tesseract?.createWorker) return Promise.resolve(window.Tesseract);
-    return new Promise((resolve,reject) => {
-      const existing=document.querySelector('script[data-ocr-engine]');
-      if (existing) {
-        const started=Date.now();
-        const timer=setInterval(()=>{
-          if (window.Tesseract?.createWorker) { clearInterval(timer); resolve(window.Tesseract); }
-          else if (Date.now()-started>20000) { clearInterval(timer); reject(new Error('OCR engine timed out')); }
-        },100);
-        return;
-      }
-      const script=document.createElement('script');
-      script.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  const OCR_SOURCES = [
+    {
+      label:'jsDelivr',
+      script:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+      workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+      corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
+      langPath:'https://tessdata.projectnaptha.com/4.0.0'
+    },
+    {
+      label:'cdnjs + unpkg',
+      script:'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js',
+      workerPath:'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js',
+      corePath:'https://unpkg.com/tesseract.js-core@5.1.1',
+      langPath:'https://tessdata.projectnaptha.com/4.0.0'
+    },
+    {
+      label:'unpkg',
+      script:'https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js',
+      workerPath:'https://unpkg.com/tesseract.js@5.1.1/dist/worker.min.js',
+      corePath:'https://unpkg.com/tesseract.js-core@5.1.1',
+      langPath:'https://tessdata.projectnaptha.com/4.0.0'
+    }
+  ];
+
+  function loadExternalScript(url, timeoutMs=18000) {
+    return new Promise((resolve,reject)=>{
+      const prior=[...document.scripts].find(el=>el.src===url);
+      if (prior && window.Tesseract?.createWorker) return resolve();
+      const script=prior || document.createElement('script');
+      let done=false;
+      const finish=(ok,err)=>{
+        if(done) return; done=true; clearTimeout(timer);
+        script.onload=null; script.onerror=null;
+        ok ? resolve() : reject(err || new Error('Script load failed'));
+      };
+      const timer=setTimeout(()=>finish(false,new Error('OCR library timed out')),timeoutMs);
       script.async=true;
       script.dataset.ocrEngine='tesseract';
-      script.onload=()=>window.Tesseract?.createWorker ? resolve(window.Tesseract) : reject(new Error('OCR engine unavailable'));
-      script.onerror=()=>reject(new Error('OCR engine download failed'));
-      document.head.appendChild(script);
+      script.onload=()=>finish(!!window.Tesseract?.createWorker,new Error('OCR library loaded without createWorker'));
+      script.onerror=()=>finish(false,new Error('OCR library download failed'));
+      if(!prior){ script.src=url; document.head.appendChild(script); }
     });
+  }
+
+  async function ensureTesseract(onAttempt) {
+    if (window.Tesseract?.createWorker) return window.Tesseract;
+    let lastErr=null;
+    for (const source of OCR_SOURCES) {
+      try {
+        onAttempt?.(`Loading OCR library from ${source.label}…`);
+        await loadExternalScript(source.script);
+        if(window.Tesseract?.createWorker) return window.Tesseract;
+      } catch(err) {
+        lastErr=err;
+        document.querySelectorAll('script[data-ocr-engine]').forEach(el=>{
+          if(!window.Tesseract?.createWorker) el.remove();
+        });
+      }
+    }
+    throw new Error(`OCR library could not load${lastErr?.message?`: ${lastErr.message}`:''}`);
+  }
+
+  async function createOcrWorker(Tesseract, onAttempt, onLog) {
+    let lastErr=null;
+    for (const source of OCR_SOURCES) {
+      let worker=null;
+      try {
+        onAttempt?.(`Starting OCR engine via ${source.label}…`);
+        worker=await Tesseract.createWorker('eng', 1, {
+          workerPath:source.workerPath,
+          corePath:source.corePath,
+          langPath:source.langPath,
+          workerBlobURL:true,
+          logger:m=>onLog?.(m),
+          errorHandler:err=>console.error(`OCR worker error (${source.label})`,err)
+        });
+        return {worker,source};
+      } catch(err) {
+        lastErr=err;
+        try { await worker?.terminate?.(); } catch {}
+        console.warn(`OCR startup failed via ${source.label}`,err);
+      }
+    }
+    throw new Error(`OCR worker could not start${lastErr?.message?`: ${lastErr.message}`:''}`);
+  }
+
+  function compactOcrError(err) {
+    const raw=String(err?.message || err || 'Unknown OCR error').replace(/\s+/g,' ').trim();
+    return raw.length>180 ? `${raw.slice(0,177)}…` : raw;
   }
 
   async function handleScreenshotImport(e) {
@@ -772,12 +841,14 @@
     let worker=null;
     try {
       safeText(stage,'Loading OCR engine…');
-      const Tesseract=await ensureTesseract();
-      worker=await Tesseract.createWorker('eng', 1, {
-        logger: m => {
-          if (m.status && m.status!=='recognizing text') safeText(detail,m.status);
-        }
-      });
+      const Tesseract=await ensureTesseract(msg=>safeText(detail,msg));
+      const workerResult=await createOcrWorker(
+        Tesseract,
+        msg=>safeText(detail,msg),
+        m=>{ if (m.status && m.status!=='recognizing text') safeText(detail,m.status); }
+      );
+      worker=workerResult.worker;
+      safeText(detail,`OCR engine ready (${workerResult.source.label}).`);
 
       const allItems=[];
       const fallbackText=[];
@@ -832,9 +903,12 @@
     } catch (err) {
       console.error('Screenshot OCR failed',err);
       if (modal?.isConnected) modal.remove();
+      const detailMessage=compactOcrError(err);
       openModal('Screenshot import unavailable', `
         <p>The OCR engine could not complete this import.</p>
-        <p class="small muted">Check your internet connection and retry. Your current trip and grocery list were not changed.</p>
+        <p class="small muted">The app tried multiple OCR delivery paths. Your current trip and grocery list were not changed.</p>
+        <div class="info-box"><strong>Diagnostic</strong><div class="small" style="margin-top:6px;word-break:break-word">${escapeHtml(detailMessage)}</div></div>
+        <p class="small muted" style="margin-bottom:0">If this appears again, send a screenshot of this diagnostic. It identifies whether iPhone Safari blocked the OCR library, worker, language data, or WebAssembly core.</p>
       `);
     } finally {
       try { if(worker) await worker.terminate(); } catch {}
