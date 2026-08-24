@@ -1,8 +1,10 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.2.6';
+  const APP_VERSION = '0.3.0';
   const STORAGE_KEY = 'grocery-companion-state-v1';
+  const OCR_KEY_STORAGE = 'grocery-companion-ocr-api-key';
+  const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
   const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -251,7 +253,7 @@
           <button class="btn btn-secondary" data-plan-action="add">Add item</button>
           <button class="btn btn-secondary" data-plan-action="paste">Paste cart text</button>
         </div>
-        <p class="import-note" style="margin-bottom:0">Upload one or more screenshots from the Walmart or Sam's Club cart. The app reads them, removes likely overlap duplicates, and requires a review before adding anything to your list.</p>
+        <p class="import-note" style="margin-bottom:0">Upload one or more screenshots from the Walmart or Sam's Club cart. The app reads them, removes likely overlap duplicates, and requires a review before adding anything to your list. Screenshot OCR uses OCR.space and needs a free API key the first time.</p>
       </section>
 
       <section class="card">
@@ -309,7 +311,22 @@
     return `<section class="card"><h2>Completed trips</h2>${state.history.map(t => `<div class="history-row"><div><strong>${escapeHtml(t.store)}</strong><div class="small muted">${escapeHtml(t.date)} · ${t.items.length} items · Budget ${money(t.budget)}</div></div><div style="text-align:right"><strong>${money(t.actualTotal ?? tripTotal(t))}</strong><div><button class="btn btn-secondary small" data-view-history="${t.id}" type="button">View</button></div></div></div>`).join('')}</section>`;
   }
 
+  function getOcrApiKey() {
+    try { return String(localStorage.getItem(OCR_KEY_STORAGE) || '').trim(); }
+    catch { return ''; }
+  }
+
+  function setOcrApiKey(value) {
+    const clean=String(value||'').trim();
+    try {
+      if(clean) localStorage.setItem(OCR_KEY_STORAGE,clean);
+      else localStorage.removeItem(OCR_KEY_STORAGE);
+      return true;
+    } catch { return false; }
+  }
+
   function renderSettings() {
+    const hasOcrKey=Boolean(getOcrApiKey());
     return `
       <section class="card">
         <h2>Defaults</h2>
@@ -318,8 +335,15 @@
       </section>
       ${['Walmart',"Sam's Club"].map(store => `<section class="card"><h2>${escapeHtml(store)} store route</h2><p class="muted small">Move categories into the order you normally walk this store.</p><div>${state.storeProfiles[store].route.map((cat,ix,arr)=>`<div class="route-row"><strong>${ix+1}. ${escapeHtml(cat)}</strong><div class="route-actions"><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="up" ${ix===0?'disabled':''}>↑</button><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="down" ${ix===arr.length-1?'disabled':''}>↓</button></div></div>`).join('')}</div></section>`).join('')}
       <section class="card">
+        <h2>Screenshot OCR</h2>
+        <p class="muted small">Version 0.3 uses OCR.space instead of running Tesseract inside iPhone Safari. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
+        <div class="field"><label>OCR.space API key</label><input id="ocrApiKey" type="password" autocomplete="off" placeholder="${hasOcrKey?'API key saved on this device':'Paste your free API key'}"></div>
+        <div class="btn-row"><button class="btn btn-primary" data-settings-action="save-ocr-key">Save key</button><button class="btn btn-secondary" data-settings-action="test-ocr">Test OCR</button>${hasOcrKey?'<button class="btn btn-secondary" data-settings-action="clear-ocr-key">Remove key</button>':''}</div>
+        <p class="small muted">Need a key? <a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a>. Screenshot images are sent to OCR.space only when you choose Upload cart screenshots.</p>
+      </section>
+      <section class="card">
         <h2>Data</h2>
-        <p class="muted small">Everything is stored locally in this browser. Export a backup before clearing browser data or changing devices.</p>
+        <p class="muted small">Trips, item history, routes, and preferences are stored locally in this browser. Export a backup before clearing browser data or changing devices.</p>
         <div class="btn-row"><button class="btn btn-secondary" data-settings-action="export">Export backup</button><label class="btn btn-secondary" style="display:inline-flex;align-items:center">Import backup<input id="backupImport" type="file" accept="application/json" hidden></label><button class="btn btn-danger" data-settings-action="reset">Reset app</button></div>
         <p class="small muted" style="margin-bottom:0">Version ${APP_VERSION}</p>
       </section>
@@ -359,6 +383,17 @@
       $('#defaultStore')?.addEventListener('change', e => commit(s => s.settings.defaultStore=e.target.value));
       $('#defaultBudget')?.addEventListener('change', e => commit(s => s.settings.defaultBudget=Math.max(0,num(e.target.value))));
       $$('[data-route-dir]').forEach(b => b.addEventListener('click', () => moveRoute(b.dataset.routeStore, Number(b.dataset.routeIndex), b.dataset.routeDir)));
+      $('[data-settings-action="save-ocr-key"]')?.addEventListener('click', () => {
+        const value=$('#ocrApiKey')?.value?.trim()||'';
+        if(!value) return toast('Paste your OCR API key first');
+        if(!setOcrApiKey(value)) return toast('Could not save OCR key');
+        render(); toast('OCR key saved');
+      });
+      $('[data-settings-action="clear-ocr-key"]')?.addEventListener('click', () => {
+        if(!confirm('Remove the OCR API key from this device?')) return;
+        setOcrApiKey(''); render(); toast('OCR key removed');
+      });
+      $('[data-settings-action="test-ocr"]')?.addEventListener('click', runOcrSelfTest);
       $('[data-settings-action="export"]')?.addEventListener('click', exportBackup);
       $('[data-settings-action="reset"]')?.addEventListener('click', resetApp);
       $('#backupImport')?.addEventListener('change', importBackup);
@@ -731,238 +766,118 @@
     }));
   }
 
-  const OCR_CACHE = 'grocery-ocr-v0.2.6';
-  const OCR_FILES = [
-    {
-      key:'api', label:'Tesseract API', local:'./ocr/tesseract.min.js', minBytes:50000,
-      type:'application/javascript; charset=utf-8',
-      remotes:[
-        {label:'GitHub raw',url:'https://raw.githubusercontent.com/ShinobuMiya/x-auto-translator/92d5b33975e3759c84b3b593948ca273ab9709f0/tesseract.min.js'},
-        {label:'jsDelivr',url:'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js'},
-        {label:'unpkg',url:'https://unpkg.com/tesseract.js@7.0.0/dist/tesseract.min.js'}
-      ]
-    },
-    {
-      key:'worker', label:'OCR worker', local:'./ocr/worker.min.js', minBytes:70000,
-      type:'application/javascript; charset=utf-8',
-      remotes:[
-        {label:'GitHub raw',url:'https://raw.githubusercontent.com/ShinobuMiya/x-auto-translator/92d5b33975e3759c84b3b593948ca273ab9709f0/worker.min.js'},
-        {label:'jsDelivr',url:'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/worker.min.js'},
-        {label:'unpkg',url:'https://unpkg.com/tesseract.js@7.0.0/dist/worker.min.js'}
-      ]
-    },
-    {
-      key:'core-basic', label:'OCR core (compatibility LSTM)', local:'./ocr/tesseract-core-lstm.wasm.js', minBytes:2500000,
-      type:'application/javascript; charset=utf-8',
-      remotes:[
-        {label:'GitHub raw',url:'https://raw.githubusercontent.com/naptha/tesseract.js-core/v7.0.0/tesseract-core-lstm.wasm.js'},
-        {label:'jsDelivr',url:'https://cdn.jsdelivr.net/npm/tesseract.js-core@7.0.0/tesseract-core-lstm.wasm.js'}
-      ]
-    }
-  ];
-
-  function appAssetUrl(relativePath) {
-    return new URL(relativePath, document.baseURI).href;
+  function overlayToLines(overlay) {
+    const source=overlay?.Lines;
+    if(!Array.isArray(source)) return [];
+    return source.map(line=>{
+      const words=(line?.Words||[]).map(w=>({
+        text:normalizeOcrLine(w?.WordText||''),
+        confidence:100,
+        x0:num(w?.Left,0), y0:num(w?.Top,0),
+        x1:num(w?.Left,0)+num(w?.Width,0),
+        y1:num(w?.Top,0)+num(w?.Height,0)
+      })).filter(w=>w.text);
+      const x0=words.length?Math.min(...words.map(w=>w.x0)):0;
+      const y0=words.length?Math.min(...words.map(w=>w.y0)):num(line?.MinTop,0);
+      const x1=words.length?Math.max(...words.map(w=>w.x1)):0;
+      const y1=words.length?Math.max(...words.map(w=>w.y1)):y0+num(line?.MaxHeight,0);
+      return {text:normalizeOcrLine(line?.LineText||words.map(w=>w.text).join(' ')),x0,y0,x1,y1,confidence:100,words};
+    }).filter(l=>l.text).sort((a,b)=>(a.y0-b.y0)||(a.x0-b.x0));
   }
 
-  async function fetchWithTimeout(url, timeoutMs=90000) {
+  function canvasToBlob(canvas,type='image/jpeg',quality=0.94) {
+    return new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('Could not prepare screenshot image')),type,quality));
+  }
+
+  async function ocrSpaceRecognize(blob, apiKey, label='screenshot', timeoutMs=75000) {
+    if(!apiKey) throw new Error('OCR API key is not configured');
+    const form=new FormData();
+    form.append('apikey',apiKey);
+    form.append('language','eng');
+    form.append('isOverlayRequired','true');
+    form.append('OCREngine','2');
+    form.append('detectOrientation','false');
+    form.append('scale','false');
+    form.append('isTable','false');
+    form.append('file',blob,`${label.replace(/[^a-z0-9_-]+/gi,'-')}.jpg`);
+
     const controller=new AbortController();
     const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    let response;
     try {
-      const response=await fetch(url,{mode:'cors',cache:'no-store',signal:controller.signal});
-      if(!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response;
+      response=await fetch(OCR_ENDPOINT,{method:'POST',body:form,signal:controller.signal,cache:'no-store'});
     } catch(err) {
-      if(err?.name==='AbortError') throw new Error('download timed out');
-      throw err;
+      if(err?.name==='AbortError') throw new Error('OCR request timed out');
+      throw new Error(`Could not reach OCR service: ${String(err?.message||err||'network error')}`);
     } finally { clearTimeout(timer); }
-  }
+    if(!response.ok) throw new Error(`OCR service returned HTTP ${response.status}`);
 
-  function getServiceWorkerVersion(controller,timeoutMs=1800) {
-    return new Promise(resolve=>{
-      if(!controller) return resolve('');
-      const channel=new MessageChannel();
-      let done=false;
-      const finish=value=>{ if(done) return; done=true; clearTimeout(timer); resolve(value||''); };
-      const timer=setTimeout(()=>finish(''),timeoutMs);
-      channel.port1.onmessage=e=>finish(e.data?.version||'');
-      try { controller.postMessage({type:'GET_VERSION'},[channel.port2]); }
-      catch { finish(''); }
-    });
-  }
-
-  async function ensureOcrServiceWorker(onAttempt) {
-    if(!('serviceWorker' in navigator)) throw new Error('Safari does not expose service-worker support on this page');
-    onAttempt?.('Activating Grocery Companion OCR storage…');
-    const registration=await navigator.serviceWorker.register('./sw.js');
-    try { await registration.update(); } catch {}
-    await navigator.serviceWorker.ready;
-
-    let controller=navigator.serviceWorker.controller;
-    let version=await getServiceWorkerVersion(controller);
-    if(version==='0.2.6') return registration;
-
-    try { registration.waiting?.postMessage({type:'SKIP_WAITING'}); } catch {}
-    await new Promise(resolve=>{
-      let finished=false;
-      const finish=()=>{ if(finished) return; finished=true; clearTimeout(timer); navigator.serviceWorker.removeEventListener('controllerchange',finish); resolve(); };
-      const timer=setTimeout(finish,7000);
-      navigator.serviceWorker.addEventListener('controllerchange',finish,{once:true});
-    });
-    controller=navigator.serviceWorker.controller;
-    version=await getServiceWorkerVersion(controller);
-    if(version!=='0.2.6') throw new Error(`OCR service worker ${version||'unknown'} is controlling the page; v0.2.6 is required. Reload once and retry.`);
-    return registration;
-  }
-
-  async function cacheOcrFile(file,onAttempt) {
-    const localUrl=appAssetUrl(file.local);
-    const request=new Request(localUrl,{method:'GET'});
-    const cache=await caches.open(OCR_CACHE);
-    const existing=await cache.match(request);
-    if(existing) {
-      const size=Number(existing.headers.get('X-Grocery-OCR-Bytes')||0);
-      if(size>=file.minBytes) return {file,bytes:size,cached:true};
-      await cache.delete(request);
+    let data;
+    try { data=await response.json(); }
+    catch { throw new Error('OCR service returned an unreadable response'); }
+    if(data?.IsErroredOnProcessing) {
+      const msg=[data?.ErrorMessage,data?.ErrorDetails].flat().filter(Boolean).join(' · ');
+      throw new Error(msg||'OCR service could not process the image');
     }
-
-    const failures=[];
-    for(const remote of file.remotes) {
-      try {
-        onAttempt?.(`Downloading ${file.label} from ${remote.label}…`);
-        const response=await fetchWithTimeout(remote.url,90000);
-        const body=await response.arrayBuffer();
-        if(body.byteLength<file.minBytes) throw new Error(`only ${body.byteLength.toLocaleString()} bytes received`);
-        await cache.put(request,new Response(body,{
-          status:200,
-          headers:{
-            'Content-Type':file.type,
-            'Cache-Control':'public, max-age=31536000, immutable',
-            'X-Grocery-OCR-Bytes':String(body.byteLength),
-            'X-Grocery-OCR-Source':remote.label
-          }
-        }));
-        return {file,bytes:body.byteLength,cached:false,source:remote.label};
-      } catch(err) {
-        failures.push(`${remote.label}: ${String(err?.message||err||'failed')}`);
-      }
-    }
-    throw new Error(`${file.label} could not be downloaded (${failures.join(' | ')})`);
+    const parsed=Array.isArray(data?.ParsedResults)?data.ParsedResults[0]:null;
+    if(!parsed) throw new Error('OCR service returned no parsed result');
+    const text=String(parsed?.ParsedText||'');
+    const lines=overlayToLines(parsed?.TextOverlay);
+    return {text,lines};
   }
 
-  async function verifyLocalOcrFile(relativePath,minBytes) {
-    const response=await fetch(appAssetUrl(relativePath),{cache:'no-store'});
-    if(!response.ok) throw new Error(`${relativePath} returned HTTP ${response.status}`);
-    const body=await response.arrayBuffer();
-    if(body.byteLength<minBytes) throw new Error(`${relativePath} returned only ${body.byteLength.toLocaleString()} bytes`);
-    return body.byteLength;
+  async function recognizeScreenshotWithCloud(file, apiKey, onStage) {
+    const img=await loadImageFile(file);
+    const width=img.naturalWidth||img.width;
+    const height=img.naturalHeight||img.height;
+
+    onStage?.('Reading product layout…');
+    const fullCanvas=document.createElement('canvas');
+    fullCanvas.width=width; fullCanvas.height=height;
+    const fullCtx=fullCanvas.getContext('2d',{alpha:false});
+    fullCtx.fillStyle='#fff'; fullCtx.fillRect(0,0,width,height); fullCtx.drawImage(img,0,0,width,height);
+    const fullBlob=await canvasToBlob(fullCanvas);
+    const full=await ocrSpaceRecognize(fullBlob,apiKey,'cart-full');
+
+    onStage?.('Verifying price column…');
+    const crop=createPriceColumnCanvas(img);
+    const cropBlob=await canvasToBlob(crop.canvas);
+    const price=await ocrSpaceRecognize(cropBlob,apiKey,'cart-prices');
+    const priceLines=mapCropLinesToImage(price.lines,crop);
+
+    return {width,height,fullLines:full.lines,priceLines,text:full.text};
   }
 
-  function loadSameOriginScript(relativePath,timeoutMs=15000) {
-    return new Promise((resolve,reject)=>{
-      if(window.Tesseract?.createWorker) return resolve();
-      document.querySelectorAll('script[data-local-ocr-api]').forEach(el=>el.remove());
-      const script=document.createElement('script');
-      let settled=false;
-      const finish=(ok,err)=>{
-        if(settled) return; settled=true; clearTimeout(timer);
-        script.onload=null; script.onerror=null;
-        ok ? resolve() : reject(err||new Error('local OCR script did not load'));
-      };
-      const timer=setTimeout(()=>finish(false,new Error('local OCR API timed out')),timeoutMs);
-      script.async=true;
-      script.dataset.localOcrApi='true';
-      script.onload=()=>finish(!!window.Tesseract?.createWorker,new Error('local OCR API loaded but Tesseract.createWorker was missing'));
-      script.onerror=()=>finish(false,new Error('Safari could not execute the same-origin OCR API script'));
-      script.src=appAssetUrl(relativePath);
-      document.head.appendChild(script);
-    });
+  function openOcrKeySetup(onSaved) {
+    openModal('Set up screenshot import', `
+      <p>Screenshot import now uses OCR.space instead of the OCR engine that iPhone Safari repeatedly failed to start.</p>
+      <p class="small muted">You need a free OCR.space API key once. The key is stored only in this browser and is never included in app backups.</p>
+      <div class="field"><label>OCR.space API key</label><input id="setupOcrKey" type="password" autocomplete="off" placeholder="Paste API key"></div>
+      <p class="small"><a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a></p>
+      <button class="btn btn-primary btn-block" id="saveSetupOcrKey">Save and continue</button>
+    `, root=>$('#saveSetupOcrKey',root).addEventListener('click',()=>{
+      const key=$('#setupOcrKey',root).value.trim();
+      if(!key) return toast('Paste your OCR API key');
+      if(!setOcrApiKey(key)) return toast('Could not save OCR key');
+      root.remove(); onSaved?.();
+    }));
   }
 
-  async function ensureTesseract(onAttempt) {
-    if(window.Tesseract?.createWorker) return window.Tesseract;
-    await ensureOcrServiceWorker(onAttempt);
-    if(!('caches' in window)) throw new Error('Safari Cache Storage is unavailable');
-
-    const api=OCR_FILES.find(f=>f.key==='api');
-    await cacheOcrFile(api,onAttempt);
-    onAttempt?.('Verifying local OCR API…');
-    await verifyLocalOcrFile(api.local,api.minBytes);
-    onAttempt?.('Starting same-origin OCR API…');
-    await loadSameOriginScript(api.local);
-    if(!window.Tesseract?.createWorker) throw new Error('Tesseract API did not initialize');
-    return window.Tesseract;
-  }
-
-  async function prepareLocalOcrRuntime(onAttempt) {
-    await ensureOcrServiceWorker(onAttempt);
-    const runtimeFiles=OCR_FILES.filter(f=>f.key!=='api');
-    for(const file of runtimeFiles) await cacheOcrFile(file,onAttempt);
-    onAttempt?.('Verifying cached OCR runtime…');
-    for(const file of runtimeFiles) {
-      const cache=await caches.open(OCR_CACHE);
-      const response=await cache.match(new Request(appAssetUrl(file.local),{method:'GET'}));
-      if(!response) throw new Error(`${file.label} is missing from local OCR storage`);
-      const body=await response.clone().arrayBuffer();
-      if(body.byteLength<file.minBytes) throw new Error(`${file.label} is incomplete (${body.byteLength.toLocaleString()} bytes)`);
-    }
-  }
-
-  async function cachedOcrText(key) {
-    const file=OCR_FILES.find(f=>f.key===key);
-    if(!file) throw new Error(`Unknown OCR asset: ${key}`);
-    const cache=await caches.open(OCR_CACHE);
-    const response=await cache.match(new Request(appAssetUrl(file.local),{method:'GET'}));
-    if(!response) throw new Error(`${file.label} is missing from local OCR storage`);
-    const text=await response.text();
-    if(text.length<file.minBytes*0.8) throw new Error(`${file.label} did not contain the expected script data`);
-    return text;
-  }
-
-  async function createOcrWorker(Tesseract,onAttempt,onLog) {
-    await prepareLocalOcrRuntime(onAttempt);
-    let worker=null;
-    let workerBlobUrl='';
-    let coreBlobUrl='';
+  async function runOcrSelfTest() {
+    const key=getOcrApiKey();
+    if(!key) return openOcrKeySetup(()=>setView('settings'));
+    const modal=openModal('Testing screenshot OCR',`<p id="selfTestStatus">Creating test image…</p><div class="progress-bar"><div class="progress-fill" style="width:12%" id="selfTestBar"></div></div>`);
+    const status=$('#selfTestStatus',modal),bar=$('#selfTestBar',modal);
     try {
-      // Safari was failing while constructing/importing a Worker from our
-      // service-worker-backed pseudo-files. Load the already-downloaded code
-      // into memory and create real blob-backed scripts instead. No worker or
-      // core request needs to cross a CDN or service-worker boundary.
-      onAttempt?.('Preparing iPhone-compatible OCR worker…');
-      const [workerCode,coreCode]=await Promise.all([
-        cachedOcrText('worker'),
-        cachedOcrText('core-basic')
-      ]);
-      workerBlobUrl=URL.createObjectURL(new Blob([workerCode],{type:'application/javascript'}));
-      coreBlobUrl=URL.createObjectURL(new Blob([coreCode],{type:'application/javascript'}));
-
-      onAttempt?.('Starting in-memory OCR worker…');
-      worker=await Tesseract.createWorker('eng',1,{
-        workerPath:workerBlobUrl,
-        // Tesseract checks whether corePath ends in "js". A fragment keeps the
-        // Blob URL intact while making it a specific script path, preventing
-        // Tesseract from appending a core filename to the Blob URL.
-        corePath:`${coreBlobUrl}#core.js`,
-        langPath:'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main',
-        gzip:false,
-        workerBlobURL:false,
-        logger:m=>onLog?.(m),
-        errorHandler:err=>console.error('OCR worker error',err)
-      });
-      return {
-        worker,
-        source:{label:'in-memory Safari compatibility OCR'},
-        cleanup:()=>{
-          if(workerBlobUrl) URL.revokeObjectURL(workerBlobUrl);
-          if(coreBlobUrl) URL.revokeObjectURL(coreBlobUrl);
-        }
-      };
+      const canvas=document.createElement('canvas'); canvas.width=1000; canvas.height=260;
+      const ctx=canvas.getContext('2d',{alpha:false}); ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.fillStyle='#000'; ctx.font='bold 54px Arial'; ctx.fillText('GROCERY OCR TEST 123.45',55,150);
+      status.textContent='Sending test image to OCR service…'; bar.style.width='55%';
+      const result=await ocrSpaceRecognize(await canvasToBlob(canvas),key,'grocery-ocr-self-test');
+      const normalized=result.text.replace(/\s+/g,' ').trim();
+      if(!/grocery/i.test(normalized) || !/(123[.,]45|12345)/.test(normalized)) throw new Error(`OCR responded, but test text was not recognized (${normalized.slice(0,100)||'no text'})`);
+      status.innerHTML='<strong>OCR connection passed.</strong><br><span class="small muted">Screenshot upload is ready on this device.</span>'; bar.style.width='100%';
     } catch(err) {
-      try { await worker?.terminate?.(); } catch {}
-      if(workerBlobUrl) URL.revokeObjectURL(workerBlobUrl);
-      if(coreBlobUrl) URL.revokeObjectURL(coreBlobUrl);
-      throw new Error(`In-memory OCR worker could not start: ${String(err?.message||err||'unknown error')}`);
+      status.innerHTML=`<strong>OCR test failed.</strong><br><span class="small muted">${escapeHtml(compactOcrError(err))}</span>`; bar.style.width='100%';
     }
   }
 
@@ -975,97 +890,63 @@
     const input=e.target;
     const files=[...(input.files||[])].filter(f=>f.type.startsWith('image/'));
     input.value='';
-    if (!files.length) return;
-    if (files.length>12) return toast('Choose 12 screenshots or fewer');
+    if(!files.length) return;
+    return processScreenshotFiles(files);
+  }
+
+  async function processScreenshotFiles(files) {
+    if(files.length>12) return toast('Choose 12 screenshots or fewer');
     const t=state.currentTrip; if(!t) return;
 
+    const apiKey=getOcrApiKey();
+    if(!apiKey) return openOcrKeySetup(()=>processScreenshotFiles(files));
+
     const modal=openModal('Reading cart screenshots', `
-      <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'} on this device. The first OCR run needs an internet connection to load the recognition engine.</p>
-      <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Using the product layout and the price column separately for a more reliable import.</div></div>
+      <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'}. Images are sent to OCR.space for text recognition; nothing is added to your grocery list until you approve the review screen.</p>
+      <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Using the product layout and price column separately for a more reliable import.</div></div>
     `);
-    const stage=$('#ocrStage',modal), bar=$('#ocrProgress',modal), detail=$('#ocrDetail',modal);
+    const stage=$('#ocrStage',modal),bar=$('#ocrProgress',modal),detail=$('#ocrDetail',modal);
     const safeText=(el,text)=>{ if(el?.isConnected) el.textContent=text; };
     const safeWidth=(el,pct)=>{ if(el?.isConnected) el.style.width=`${clamp(pct,2,100)}%`; };
-
-    let worker=null;
-    let workerCleanup=null;
     let diagnosticStage='Preparing OCR';
     const reportStage=msg=>{ diagnosticStage=String(msg||diagnosticStage); safeText(detail,diagnosticStage); };
-    try {
-      safeText(stage,'Loading OCR engine…');
-      const Tesseract=await ensureTesseract(reportStage);
-      const workerResult=await createOcrWorker(
-        Tesseract,
-        reportStage,
-        m=>{ if (m.status && m.status!=='recognizing text') safeText(detail,m.status); }
-      );
-      worker=workerResult.worker;
-      workerCleanup=workerResult.cleanup||null;
-      safeText(detail,`OCR engine ready (${workerResult.source.label}).`);
 
+    try {
       const allItems=[];
       const fallbackText=[];
-      for (let ix=0;ix<files.length;ix++) {
+      for(let ix=0;ix<files.length;ix++) {
         safeText(stage,`Reading screenshot ${ix+1} of ${files.length}`);
-        safeText(detail,`${files[ix].name || `Screenshot ${ix+1}`} · product layout`);
-        safeWidth(bar,(ix/files.length)*88+5);
-
-        const img=await loadImageFile(files[ix]);
-        const width=img.naturalWidth||img.width;
-        const height=img.naturalHeight||img.height;
-
-        try {
-          await worker.setParameters({tessedit_pageseg_mode:Tesseract.PSM?.AUTO || '3'});
-        } catch {}
-        const fullResult=await worker.recognize(img, {}, {text:true,blocks:true});
-        const fullLines=flattenOcrBlocks(fullResult?.data?.blocks);
-        fallbackText.push(fullResult?.data?.text||'');
-
-        safeText(detail,`${files[ix].name || `Screenshot ${ix+1}`} · verifying prices`);
-        safeWidth(bar,(ix/files.length)*88+13);
-        const crop=createPriceColumnCanvas(img);
-        try {
-          await worker.setParameters({
-            tessedit_pageseg_mode:Tesseract.PSM?.SINGLE_BLOCK || '6',
-            preserve_interword_spaces:'1'
-          });
-        } catch {}
-        const priceResult=await worker.recognize(crop.canvas, {}, {text:true,blocks:true});
-        const priceLines=mapCropLinesToImage(flattenOcrBlocks(priceResult?.data?.blocks),crop);
-
+        safeWidth(bar,(ix/files.length)*92+4);
+        const result=await recognizeScreenshotWithCloud(files[ix],apiKey,msg=>reportStage(`${files[ix].name||`Screenshot ${ix+1}`} · ${msg}`));
+        fallbackText.push(result.text||'');
         let parsed=[];
-        if (fullLines.length) parsed=parseScreenshotLayout(fullLines,priceLines,width,height,t.store);
-        if (!parsed.length) parsed=parseScreenshotText(fullResult?.data?.text||'',t.store);
+        if(result.fullLines.length) parsed=parseScreenshotLayout(result.fullLines,result.priceLines,result.width,result.height,t.store);
+        if(!parsed.length) parsed=parseScreenshotText(result.text||'',t.store);
         allItems.push(...parsed);
       }
 
-      safeText(stage,'Building grocery list…'); safeWidth(bar,96);
+      safeText(stage,'Building grocery list…'); safeWidth(bar,97);
       let items=dedupeScreenshotItems(allItems);
-      if (!items.length && fallbackText.length) items=parseScreenshotText(fallbackText.join('\n'),t.store);
+      if(!items.length && fallbackText.length) items=parseScreenshotText(fallbackText.join('\n'),t.store);
 
-      if (modal?.isConnected) modal.remove();
-      if (!items.length) {
+      if(modal?.isConnected) modal.remove();
+      if(!items.length) {
         openModal('No products recognized', `
-          <p>I could read the screenshot text, but I could not confidently pair product names with current prices.</p>
-          <p class="small muted">Try screenshots that show the product name and current price together. You can also use Paste cart text as a fallback.</p>
+          <p>The OCR service read the screenshots, but Grocery Companion could not confidently pair product names with current prices.</p>
+          <p class="small muted">Try screenshots that show each product name and current price together. You can also use Paste cart text as a fallback.</p>
           <button class="btn btn-primary btn-block" id="ocrFallbackPaste">Open paste importer</button>
-        `, root => $('#ocrFallbackPaste',root).addEventListener('click',()=>{root.remove();openPasteImportModal();}));
+        `, root=>$('#ocrFallbackPaste',root).addEventListener('click',()=>{root.remove();openPasteImportModal();}));
         return;
       }
-      openImportReview(items, {source:'screenshots'});
-    } catch (err) {
+      openImportReview(items,{source:'screenshots'});
+    } catch(err) {
       console.error('Screenshot OCR failed',err);
-      if (modal?.isConnected) modal.remove();
-      const detailMessage=compactOcrError(err);
+      if(modal?.isConnected) modal.remove();
       openModal('Screenshot import unavailable', `
-        <p>The OCR engine could not complete this import.</p>
-        <p class="small muted">The app could not stage or start its local OCR files. Your current trip and grocery list were not changed.</p>
-        <div class="info-box"><strong>Diagnostic</strong><div class="small" style="margin-top:6px;word-break:break-word"><strong>Stage:</strong> ${escapeHtml(diagnosticStage)}<br><strong>Error:</strong> ${escapeHtml(detailMessage)}</div></div>
-        <p class="small muted" style="margin-bottom:0">If this appears again, send a screenshot of this diagnostic. It identifies whether iPhone Safari blocked the OCR library, worker, language data, or WebAssembly core.</p>
+        <p>The OCR service could not complete this import. Your current trip and grocery list were not changed.</p>
+        <div class="import-note"><strong>Stage:</strong> ${escapeHtml(diagnosticStage)}<br><strong>Error:</strong> ${escapeHtml(compactOcrError(err))}</div>
+        <p class="small muted">Use Settings → Screenshot OCR → Test OCR to verify the API key and connection.</p>
       `);
-    } finally {
-      try { if(worker) await worker.terminate(); } catch {}
-      try { workerCleanup?.(); } catch {}
     }
   }
 

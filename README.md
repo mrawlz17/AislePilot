@@ -1,73 +1,49 @@
-# Grocery Companion v0.2.6
+# Grocery Companion v0.3.0
 
-A reliability-first local web app for planning and shopping Walmart and Sam's Club grocery trips.
+Reliability-first local web app for planning and shopping Walmart and Sam's Club grocery trips.
 
-## Included in this release
+## What changed in v0.3.0
 
-- Separate Walmart and Sam's Club trip profiles
-- Budget and projected total tracking
-- Screenshot-to-list import for Walmart and Sam's Club carts
-- Multi-screenshot OCR with overlap deduplication
-- Mandatory import review before list changes
-- Add/edit/delete grocery items
-- Quantity and unit-price math
-- Category suggestions with local item memory
-- Editable store-route ordering
-- Shopping mode with large one-tap completion controls
-- Picked-up and remaining-dollar totals
-- Completed-trip history
-- Optional actual checkout total
-- Local JSON backup export/import
-- Local-only grocery/trip storage
-- Installable PWA/offline app shell
+Version 0.3.0 removes Tesseract.js and all browser Worker/WebAssembly OCR startup code. Repeated iPhone Safari tests showed the Tesseract worker failing before screenshot recognition began, even after multiple loading strategies.
 
-## Screenshot import
+Screenshot import now uses the OCR.space API instead:
 
-Select one or more Walmart or Sam's Club cart screenshots. Grocery Companion OCRs each screenshot in the browser, uses the on-screen product layout to associate names with the right-side current price, verifies the price column in a separate OCR pass, removes likely duplicates caused by overlapping screenshots, and opens a mandatory review screen before saving anything.
+1. Select Walmart or Sam's Club cart screenshots.
+2. Grocery Companion sends each screenshot to OCR.space for text recognition.
+3. The app separately verifies the right-side price column to improve product/price pairing.
+4. Likely overlapping duplicates are removed.
+5. A review screen is mandatory before any item is added to the trip.
 
-The parser is designed to ignore unit-price text, crossed-out old prices, savings amounts, order headers, and quantity metadata that should not become grocery items.
+The grocery list, budgets, store routes, trip history, and learned categories remain stored locally in the browser.
 
-### v0.2.6 iPhone OCR startup change
+## One-time screenshot OCR setup
 
-V0.2.6 removes the remaining blob-script startup path that could fail with a generic `Load failed` on iPhone Safari:
+1. Open **Settings → Screenshot OCR**.
+2. Use the included link to request a free OCR.space API key.
+3. Paste the key into Grocery Companion and tap **Save key**.
+4. Tap **Test OCR**. The app generates a test image and confirms the OCR connection before you use real cart screenshots.
 
-- The Tesseract API is downloaded as data, stored under a Grocery Companion same-origin URL, verified, and then loaded through a normal same-origin `<script>` request. Safari is no longer asked to execute a dynamically-created `blob:` OCR library.
-- GitHub Raw is the primary pinned source for the Tesseract API, worker, and LSTM core files; CDN sources are secondary fallbacks.
-- The English model uses the official `tessdata_fast` LSTM model and is staged as an uncompressed `.traineddata` file with `gzip:false`.
-- The OCR runtime stages the basic LSTM, SIMD LSTM, and relaxed-SIMD LSTM core variants and gives Tesseract the local core directory so it can select the compatible build.
-- Every staged file is size-checked before `createWorker()` runs.
-- The error dialog records both the **last setup stage** and the actual error. A future failure should therefore identify whether it occurred while downloading, verifying, loading the API, or starting the worker.
-- Grocery/trip data remains untouched until the import review is confirmed.
+The API key is stored separately in browser local storage. It is not included in Grocery Companion backup files and is not committed to GitHub.
 
-The first OCR setup requires internet access to obtain the OCR runtime. After successful staging, the files are reused from browser Cache Storage until site data is cleared or the app changes OCR versions.
+## Screenshot privacy
 
-Manual entry and the paste importer remain available as fallbacks.
+Only screenshots you explicitly choose for import are sent to OCR.space. Grocery Companion does not upload trip history, budgets, shopping routes, or saved item data.
 
-## Deploy to GitHub Pages
+## Core features
 
-Upload these files to the root of the GitHub repository:
+- Walmart and Sam's Club trip profiles
+- Two-week budget and projected total
+- Screenshot-to-list import with mandatory review
+- Manual item entry and paste import fallback
+- Automatic category suggestions and remembered categories
+- Editable store-route order
+- Shopping mode with picked/remaining totals
+- Completed trip history
+- Local JSON backup and restore
+- Installable/offline-capable PWA shell
 
-- `index.html`
-- `styles.css`
-- `app.js`
-- `manifest.json`
-- `sw.js`
-- `icon.svg`
-- `icon-180.png`
-- `icon-512.png`
-- `README.md`
+## Deployment
 
-Then enable GitHub Pages for the repository branch/folder containing the files.
+Upload all files in this release directory to the GitHub Pages repository root. Replace the previous release files. After deployment, reload Safari and verify **Settings → Version 0.3.0**.
 
-After replacing an older Grocery Companion release, reload Safari once and verify **Settings → Version = 0.2.6** before testing screenshot import.
-
-## Data note
-
-Grocery Companion stores trip/list data in browser localStorage. OCR runtime files use browser Cache Storage. Use **Settings → Export backup** before clearing browser/site data or moving to another device.
-
-
-## v0.2.6 OCR startup change
-
-On iPhone Safari, v0.2.5 successfully downloaded and verified the OCR assets but failed at the exact point the Web Worker was started. v0.2.6 no longer asks Safari to create the OCR worker or import the OCR core from service-worker-backed pseudo-files. Instead it reads the already-downloaded worker/core scripts into memory and starts them from Blob URLs, while using the non-SIMD LSTM core for maximum compatibility.
-
-This release intentionally changes only OCR startup. The screenshot parser and grocery workflow are otherwise unchanged.
+No test-results or internal QA files belong in the deployed release.
