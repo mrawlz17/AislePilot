@@ -1,5 +1,5 @@
-const APP_CACHE='grocery-companion-v0.3.5';
-const CORE=['./','./index.html','./styles.css?v=0.3.5','./app.js?v=0.3.5','./manifest.json','./icon.svg','./icon-180.png','./icon-512.png'];
+const APP_CACHE='grocery-companion-v0.4.0';
+const CORE=['./','./index.html','./styles.css?v=0.4.0','./app.js?v=0.4.0','./manifest.json','./icon.svg','./icon-180.png','./icon-512.png'];
 
 self.addEventListener('install',event=>event.waitUntil(
   caches.open(APP_CACHE).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting())

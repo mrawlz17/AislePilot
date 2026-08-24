@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.3.5';
+  const APP_VERSION = '0.4.0';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const OCR_KEY_STORAGE = 'grocery-companion-ocr-api-key';
   const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
@@ -94,6 +94,8 @@
 
   let state = loadState();
   let deferredInstallPrompt = null;
+  let shopExpandedTripId = null;
+  const shopExpandedCategories = new Set();
 
   function saveState() {
     try {
@@ -185,6 +187,10 @@
   }
 
   function setView(view) {
+    if (view === 'shop' && state.activeView !== 'shop') {
+      shopExpandedTripId = state.currentTrip?.id || null;
+      shopExpandedCategories.clear();
+    }
     state.activeView = view;
     saveState();
     render();
@@ -204,39 +210,23 @@
     const t = state.currentTrip;
     const last = state.history[0];
     return `
-      <section class="card">
-        <h2>${t ? 'Current trip' : 'Start your next trip'}</h2>
+      <section class="card home-trip-card">
+        <div class="section-head"><h2>${t ? 'Current trip' : 'Start next trip'}</h2>${t ? `<span class="badge">${escapeHtml(t.store)}</span>` : ''}</div>
         ${t ? `
-          <div class="grid-2">
-            <div><span class="badge">${escapeHtml(t.store)}</span><div class="small muted" style="margin-top:8px">${escapeHtml(t.date)}</div></div>
-            <div class="metric"><div class="label">Projected total</div><div class="value">${money(tripTotal(t))}</div></div>
-          </div>
-          <div class="metric-grid" style="margin-top:10px">
+          <div class="home-summary-line"><span>${escapeHtml(t.date)}</span><strong>${money(tripTotal(t))}</strong></div>
+          <div class="metric-grid compact-metrics">
             <div class="metric ${tripTotal(t) <= t.budget || !t.budget ? 'good':'danger'}"><div class="label">Budget</div><div class="value">${money(t.budget)}</div></div>
             <div class="metric"><div class="label">Items</div><div class="value">${t.items.length}</div></div>
           </div>
-          <div class="btn-row" style="margin-top:14px">
+          <div class="btn-row compact-actions">
             <button class="btn btn-primary" data-home-action="continue">${t.status==='shopping'?'Continue shopping':'Open plan'}</button>
             <button class="btn btn-secondary" data-home-action="new">Start over</button>
           </div>
         ` : `
-          <p class="muted">Build a budgeted Walmart or Sam's Club trip, then shop it in your fixed shopping order.</p>
           <button class="btn btn-primary btn-block" data-home-action="new">New grocery trip</button>
         `}
       </section>
-
-      <section class="card">
-        <h2>How V1 works</h2>
-        <div class="list small">
-          <div>1. Set store and budget.</div>
-          <div>2. Upload Walmart/Sam's cart screenshots.</div>
-          <div>3. Review OCR results, categories, and prices.</div>
-          <div>4. Shop in your standard category order.</div>
-          <div>5. Save the completed trip to history.</div>
-        </div>
-      </section>
-
-      ${last ? `<section class="card"><h2>Last completed trip</h2><div class="history-row"><div><strong>${escapeHtml(last.store)}</strong><div class="small muted">${escapeHtml(last.date)} · ${last.items.length} items</div></div><strong>${money(last.actualTotal ?? tripTotal(last))}</strong></div></section>` : ''}
+      ${last ? `<section class="card"><div class="section-head"><h2>Last trip</h2><strong>${money(last.actualTotal ?? tripTotal(last))}</strong></div><div class="small muted">${escapeHtml(last.store)} · ${escapeHtml(last.date)} · ${last.items.length} items</div></section>` : ''}
     `;
   }
 
@@ -246,50 +236,58 @@
     const total = tripTotal(t);
     const cushion = t.budget - total;
     const items = sortItemsForStore(t.items,t.store);
+    const grouped = new Map();
+    for (const item of items) {
+      if (!grouped.has(item.category)) grouped.set(item.category, []);
+      grouped.get(item.category).push(item);
+    }
     return `
-      <section class="card">
-        <h2>Trip setup</h2>
-        <div class="grid-2">
+      <section class="card compact-card">
+        <div class="section-head"><h2>Trip setup</h2><span class="badge">${t.items.length} items</span></div>
+        <div class="trip-setup-grid">
           <div class="field"><label>Store</label><select id="tripStore"><option ${t.store==='Walmart'?'selected':''}>Walmart</option><option ${t.store==="Sam's Club"?'selected':''}>Sam's Club</option></select></div>
           <div class="field"><label>Trip date</label><input id="tripDate" type="date" value="${escapeHtml(t.date)}"></div>
         </div>
-        <div class="field"><label>Budget</label><input id="tripBudget" type="number" min="0" step="0.01" inputmode="decimal" value="${t.budget || ''}" placeholder="0.00"></div>
-        <div class="metric-grid">
-          <div class="metric"><div class="label">Projected</div><div class="value">${money(total)}</div></div>
-          <div class="metric ${!t.budget || cushion>=0?'good':'danger'}"><div class="label">${!t.budget?'Budget status':(cushion>=0?'Budget cushion':'Over budget')}</div><div class="value">${!t.budget?'Not set':money(Math.abs(cushion))}</div></div>
+        <div class="budget-row">
+          <div class="field"><label>Budget</label><input id="tripBudget" type="number" min="0" step="0.01" inputmode="decimal" value="${t.budget || ''}" placeholder="0.00"></div>
+          <div class="budget-summary ${!t.budget || cushion>=0?'good':'danger'}"><span>Projected</span><strong>${money(total)}</strong><small>${!t.budget?'No budget set':(cushion>=0?`${money(cushion)} left`:`${money(Math.abs(cushion))} over`)}</small></div>
         </div>
       </section>
 
-      <section class="card">
-        <h2>Add items</h2>
-        <div class="btn-row">
-          <label class="btn btn-primary" style="display:inline-flex;align-items:center;justify-content:center">Upload cart screenshots<input id="cartScreenshots" type="file" accept="image/*" multiple hidden></label>
+      <section class="card compact-card">
+        <div class="section-head"><h2>Add items</h2></div>
+        <div class="btn-row compact-actions">
+          <label class="btn btn-primary upload-btn">Upload screenshots<input id="cartScreenshots" type="file" accept="image/*" multiple hidden></label>
           <button class="btn btn-secondary" data-plan-action="add">Add item</button>
-          <button class="btn btn-secondary" data-plan-action="paste">Paste cart text</button>
+          <button class="btn btn-secondary" data-plan-action="paste">Paste text</button>
         </div>
-        <p class="small muted" style="margin:10px 0 0"><strong>Shopping order:</strong> ${SHOP_ROUTE.join(' → ')}</p>
-        <p class="import-note" style="margin-bottom:0">Upload up to 20 screenshots from the Walmart or Sam's Club cart in one selection. The app processes them in paced groups of three so the free OCR service is not flooded, retries temporary failures, removes likely overlap duplicates—including duplicates from earlier batches—and requires a review before adding anything to your list.</p>
+        <div class="small muted compact-note">Up to 20 screenshots · review before adding.</div>
       </section>
 
-      <section class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><h2 style="margin:0">Items</h2><span class="badge">${t.items.length}</span></div>
-        ${items.length ? `<div class="list" style="margin-top:12px">${items.map(renderPlanItem).join('')}</div>` : `<div class="empty"><strong>No items yet</strong>Upload cart screenshots, add a product, or paste cart text.</div>`}
+      <section class="card compact-card item-card">
+        <div class="section-head"><h2>Items</h2><span class="badge">${t.items.length}</span></div>
+        ${items.length ? `<div class="plan-groups">${[...grouped.entries()].map(([cat, catItems]) => `<div class="plan-category"><div class="category-header static"><span>${escapeHtml(cat)}</span><span>${catItems.length}</span></div>${catItems.map(renderPlanItem).join('')}</div>`).join('')}</div>` : `<div class="empty compact-empty"><strong>No items yet</strong>Upload screenshots, add an item, or paste cart text.</div>`}
       </section>
 
-      <section class="card">
+      <section class="action-footer">
         <button class="btn btn-primary btn-block" data-plan-action="shop" ${t.items.length?'':'disabled'}>Start shopping</button>
       </section>
     `;
   }
 
   function renderPlanItem(i) {
-    return `<div class="item-row" data-item-id="${i.id}"><div><div class="item-name">${escapeHtml(i.name)}</div><div class="item-meta">${i.qty} × ${money(i.unitPrice)} · ${escapeHtml(i.category)} · ${money(i.qty*i.unitPrice)}</div></div><div class="item-actions"><button class="icon-btn" type="button" data-edit-item="${i.id}" aria-label="Edit">✎</button><button class="icon-btn" type="button" data-delete-item="${i.id}" aria-label="Delete">×</button></div></div>`;
+    const meta = i.qty > 1 ? `${i.qty} × ${money(i.unitPrice)}` : '';
+    return `<div class="plan-item" data-item-id="${i.id}"><div class="plan-item-copy"><div class="item-name">${escapeHtml(i.name)}</div>${meta?`<div class="item-meta">${meta}</div>`:''}</div><strong>${money(i.qty*i.unitPrice)}</strong><div class="item-actions"><button class="icon-btn" type="button" data-edit-item="${i.id}" aria-label="Edit">✎</button><button class="icon-btn" type="button" data-delete-item="${i.id}" aria-label="Delete">×</button></div></div>`;
   }
 
   function renderShop() {
     const t = state.currentTrip;
     if (!t) return `<section class="card empty"><strong>No active trip</strong>Create a trip first.</section>`;
     if (!t.items.length) return `<section class="card empty"><strong>Your list is empty</strong>Add items in Plan before shopping.<br><br><button class="btn btn-primary" data-shop-action="plan">Go to Plan</button></section>`;
+    if (shopExpandedTripId !== t.id) {
+      shopExpandedTripId = t.id;
+      shopExpandedCategories.clear();
+    }
     const items = sortItemsForStore(t.items,t.store);
     const grouped = new Map();
     for (const item of items) {
@@ -303,22 +301,28 @@
     return `
       <div class="shop-progress">
         <div class="shop-progress-line">
-          <div><strong>${escapeHtml(t.store)}</strong> <span class="muted">· ${count}/${t.items.length}</span></div>
-          <div class="shop-progress-details"><b>${money(remaining)}</b> left · ${money(pickedTotal(t))} picked</div>
+          <strong>${escapeHtml(t.store)} · ${count}/${t.items.length}</strong>
+          <span><b>${money(remaining)}</b> left</span>
         </div>
         <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
       </div>
-      ${[...grouped.entries()].map(([cat, catItems]) => `<div class="category-header"><span>${escapeHtml(cat)}</span><span>${catItems.filter(i=>i.picked).length}/${catItems.length}</span></div>${catItems.map(renderShopItem).join('')}`).join('')}
-      <section class="card" style="margin-top:18px">
-        <div class="metric-grid"><div class="metric"><div class="label">Projected checkout</div><div class="value">${money(total)}</div></div><div class="metric ${!t.budget || total<=t.budget?'good':'danger'}"><div class="label">Budget</div><div class="value">${money(t.budget)}</div></div></div>
-        <button class="btn btn-primary btn-block" style="margin-top:12px" data-shop-action="finish">Finish trip</button>
-        <button class="btn btn-secondary btn-block" style="margin-top:8px" data-shop-action="plan">Back to Plan</button>
+      <div class="shop-groups">
+        ${[...grouped.entries()].map(([cat, catItems]) => {
+          const expanded = shopExpandedCategories.has(cat);
+          const picked = catItems.filter(i=>i.picked).length;
+          return `<section class="shop-category ${expanded?'expanded':'collapsed'}"><button class="category-toggle" type="button" data-toggle-category="${escapeHtml(cat)}" aria-expanded="${expanded?'true':'false'}"><span class="category-chevron">${expanded?'▾':'▸'}</span><span class="category-name">${escapeHtml(cat)}</span><span class="category-count">${picked}/${catItems.length}</span></button>${expanded?`<div class="category-items">${catItems.map(renderShopItem).join('')}</div>`:''}</section>`;
+        }).join('')}
+      </div>
+      <section class="action-footer shop-footer">
+        <button class="btn btn-primary btn-block" data-shop-action="finish">Finish trip</button>
+        <button class="text-btn" type="button" data-shop-action="plan">Back to Plan</button>
       </section>
     `;
   }
 
   function renderShopItem(i) {
-    return `<div class="shop-item ${i.picked?'picked':''}"><button class="shop-check" data-toggle-picked="${i.id}" type="button" aria-label="${i.picked?'Mark not picked':'Mark picked'}">${i.picked?'✓':''}</button><div><div class="item-name">${escapeHtml(i.name)}</div><div class="item-meta">${i.qty} × ${money(i.unitPrice)}</div></div><strong>${money(i.qty*i.unitPrice)}</strong></div>`;
+    const meta = i.qty > 1 ? `<div class="item-meta">${i.qty} × ${money(i.unitPrice)}</div>` : '';
+    return `<div class="shop-item ${i.picked?'picked':''}"><button class="shop-check" data-toggle-picked="${i.id}" type="button" aria-label="${i.picked?'Mark not picked':'Mark picked'}">${i.picked?'✓':''}</button><div><div class="item-name">${escapeHtml(i.name)}</div>${meta}</div><strong>${money(i.qty*i.unitPrice)}</strong></div>`;
   }
 
   function renderHistory() {
@@ -350,7 +354,7 @@
       </section>
       <section class="card">
         <h2>Screenshot OCR</h2>
-        <p class="muted small">Version 0.3.5 keeps the proven screenshot-import workflow and adds a compact in-store checklist layout to reduce scrolling. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
+        <p class="muted small">Version 0.4 keeps the proven screenshot-import workflow with a compact dark layout and collapsible shopping groups. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
         <div class="field"><label>OCR.space API key</label><input id="ocrApiKey" type="password" autocomplete="off" placeholder="${hasOcrKey?'API key saved on this device':'Paste your free API key'}"></div>
         <div class="btn-row"><button class="btn btn-primary" data-settings-action="save-ocr-key">Save key</button><button class="btn btn-secondary" data-settings-action="test-ocr">Test OCR</button>${hasOcrKey?'<button class="btn btn-secondary" data-settings-action="clear-ocr-key">Remove key</button>':''}</div>
         <p class="small muted">Need a key? <a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a>. Screenshot images are sent to OCR.space only when you choose Upload cart screenshots.</p>
@@ -379,11 +383,21 @@
       $('[data-plan-action="add"]')?.addEventListener('click', () => openItemModal());
       $('[data-plan-action="paste"]')?.addEventListener('click', openPasteImportModal);
       $('#cartScreenshots')?.addEventListener('change', handleScreenshotImport);
-      $('[data-plan-action="shop"]')?.addEventListener('click', () => commit(s => { s.currentTrip.status='shopping'; s.activeView='shop'; }));
+      $('[data-plan-action="shop"]')?.addEventListener('click', () => {
+        shopExpandedTripId = state.currentTrip?.id || null;
+        shopExpandedCategories.clear();
+        commit(s => { s.currentTrip.status='shopping'; s.activeView='shop'; });
+      });
       $$('[data-edit-item]').forEach(b => b.addEventListener('click', () => openItemModal(b.dataset.editItem)));
       $$('[data-delete-item]').forEach(b => b.addEventListener('click', () => deleteItem(b.dataset.deleteItem)));
     }
     if (view === 'shop') {
+      $$('[data-toggle-category]').forEach(b => b.addEventListener('click', () => {
+        const cat=b.dataset.toggleCategory;
+        if (shopExpandedCategories.has(cat)) shopExpandedCategories.delete(cat);
+        else shopExpandedCategories.add(cat);
+        render();
+      }));
       $$('[data-toggle-picked]').forEach(b => b.addEventListener('click', () => commit(s => {
         const item=s.currentTrip.items.find(i=>i.id===b.dataset.togglePicked); if(item) item.picked=!item.picked;
       })));
@@ -414,6 +428,8 @@
   }
 
   function newTripFlow() {
+    shopExpandedTripId = null;
+    shopExpandedCategories.clear();
     if (state.currentTrip && !confirm('Replace the current trip? The existing active trip will be discarded.')) return;
     commit(s => {
       s.currentTrip = { id: uid(), store: s.settings.defaultStore || 'Walmart', date: todayISO(), budget: num(s.settings.defaultBudget), status:'planning', items:[], actualTotal:null };

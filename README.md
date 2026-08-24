@@ -1,55 +1,31 @@
-# Grocery Companion v0.3.5
+# Grocery Companion v0.4.0
 
-Reliability-first Walmart and Sam's Club shopping companion.
+Compact dark-layout release for the personal Walmart/Sam's Club shopping workflow.
 
-## What changed in v0.3.5
+## What changed
 
-- Shop view is now a dense checklist instead of a stack of large cards.
-- The large app header is hidden while actively shopping to recover vertical screen space.
-- The sticky shopping status area is reduced to one compact line plus a 4 px progress bar.
-- Product rows are approximately 46 px minimum height with smaller 30 px check controls.
-- Product names are capped at two lines so unusually long Walmart descriptions cannot make a single item excessively tall.
-- The duplicated line-total value was removed from the metadata line; the total remains visible at the right edge.
-- Category headers and spacing are substantially tightened.
-- OCR, price reconciliation, fixed shopping order, batch pacing, duplicate detection, and local data behavior are unchanged from v0.3.4.
+- Removed the **How V1 works** card from Home.
+- Switched the entire app to a darker charcoal/slate palette.
+- Reduced header, card, field, button, metric, and navigation sizing so all views use the same compact sizing system.
+- Plan now uses dense category-grouped rows similar to Shop instead of large individual item cards.
+- Single-quantity items no longer waste a second line showing `1 × price`; quantity detail is shown only when quantity is greater than one.
+- Store/date controls use a dedicated compact mobile grid and the date control is constrained so it cannot overflow its space.
+- Shop's sticky status line is smaller and now shows only the essential store/count and remaining spend.
+- Shop categories are **collapsed by default**. Tap a category header to expand or collapse it.
+- Re-entering Shop collapses all groups again by default.
+- Removed the repeated projected-total/budget card from the bottom of Shop; Finish Trip and Back to Plan are now compact actions.
+- Screenshot OCR, fixed shopping order, duplicate handling, quantity-price reconciliation, and local storage behavior are unchanged from the passing v0.3.4/v0.3.5 workflow.
 
-## Screenshot OCR setup
+## Fixed shopping order
 
-Screenshot import uses OCR.space. The API key remains stored only in this browser and is not included in backups or release files.
+Personal Care → Other → Household → Dairy → Drinks → Pantry → Meat → Frozen → Bakery → Deli → Produce
 
-1. Open **Settings → Screenshot OCR**.
-2. Paste your OCR.space API key if it is not already saved.
-3. Tap **Test OCR** if you need to verify the connection.
-4. Open **Plan → Upload cart screenshots** and select up to 20 screenshots.
+## Screenshot OCR
 
-## Shopping order
-
-Every Walmart and Sam's Club trip is sorted in this fixed order:
-
-1. Personal Care
-2. Other
-3. Household
-4. Dairy
-5. Drinks
-6. Pantry
-7. Meat
-8. Frozen
-9. Bakery
-10. Deli
-11. Produce
-
-## Data
-
-Trips, item history, learned categories, and preferences remain in browser local storage. Export a backup before clearing browser data or moving devices.
+Screenshot import continues to use OCR.space. The API key remains stored only in this browser and is not included in backups or release files.
 
 ## Deployment
 
-Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.3.5** before testing.
+Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.4.0**.
 
 The release package contains deployment/use files only; no internal QA artifacts are included.
-
-
-## v0.3.5 reliability notes
-- Screenshot OCR and quantity-price verification are unchanged from the passing v0.3.4 regression build.
-- Fixed shopping order remains the only route for both stores.
-- Versioned app assets remain cache-busted for GitHub Pages reliability.
