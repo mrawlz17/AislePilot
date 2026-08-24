@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.3.4';
+  const APP_VERSION = '0.3.5';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const OCR_KEY_STORAGE = 'grocery-companion-ocr-api-key';
   const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
@@ -192,6 +192,7 @@
 
   function render() {
     const view = state.activeView || 'home';
+    $('#app')?.classList.toggle('shop-mode', view === 'shop');
     $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view===view));
     const main = $('#main');
     const renderer = { home: renderHome, plan: renderPlan, shop: renderShop, history: renderHistory, settings: renderSettings }[view] || renderHome;
@@ -301,11 +302,11 @@
     const remaining = total - pickedTotal(t);
     return `
       <div class="shop-progress">
-        <section class="card" style="margin-bottom:8px">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><span class="badge">${escapeHtml(t.store)}</span><div class="small muted" style="margin-top:6px">${count} of ${t.items.length} items</div></div><strong>${pct}%</strong></div>
-          <div class="progress-bar" style="margin-top:10px"><div class="progress-fill" style="width:${pct}%"></div></div>
-          <div class="metric-grid" style="margin-top:10px"><div class="metric"><div class="label">Picked up</div><div class="value">${money(pickedTotal(t))}</div></div><div class="metric"><div class="label">Remaining</div><div class="value">${money(remaining)}</div></div></div>
-        </section>
+        <div class="shop-progress-line">
+          <div><strong>${escapeHtml(t.store)}</strong> <span class="muted">· ${count}/${t.items.length}</span></div>
+          <div class="shop-progress-details"><b>${money(remaining)}</b> left · ${money(pickedTotal(t))} picked</div>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
       </div>
       ${[...grouped.entries()].map(([cat, catItems]) => `<div class="category-header"><span>${escapeHtml(cat)}</span><span>${catItems.filter(i=>i.picked).length}/${catItems.length}</span></div>${catItems.map(renderShopItem).join('')}`).join('')}
       <section class="card" style="margin-top:18px">
@@ -317,7 +318,7 @@
   }
 
   function renderShopItem(i) {
-    return `<div class="shop-item ${i.picked?'picked':''}"><button class="shop-check" data-toggle-picked="${i.id}" type="button" aria-label="${i.picked?'Mark not picked':'Mark picked'}">${i.picked?'✓':''}</button><div><div class="item-name">${escapeHtml(i.name)}</div><div class="item-meta">${i.qty} × ${money(i.unitPrice)} · ${money(i.qty*i.unitPrice)}</div></div><strong>${money(i.qty*i.unitPrice)}</strong></div>`;
+    return `<div class="shop-item ${i.picked?'picked':''}"><button class="shop-check" data-toggle-picked="${i.id}" type="button" aria-label="${i.picked?'Mark not picked':'Mark picked'}">${i.picked?'✓':''}</button><div><div class="item-name">${escapeHtml(i.name)}</div><div class="item-meta">${i.qty} × ${money(i.unitPrice)}</div></div><strong>${money(i.qty*i.unitPrice)}</strong></div>`;
   }
 
   function renderHistory() {
@@ -349,7 +350,7 @@
       </section>
       <section class="card">
         <h2>Screenshot OCR</h2>
-        <p class="muted small">Version 0.3.4 keeps paced multi-screenshot batches, locks the universal shopping route, and uses a higher-accuracy verification pass for quantity-item prices. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
+        <p class="muted small">Version 0.3.5 keeps the proven screenshot-import workflow and adds a compact in-store checklist layout to reduce scrolling. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
         <div class="field"><label>OCR.space API key</label><input id="ocrApiKey" type="password" autocomplete="off" placeholder="${hasOcrKey?'API key saved on this device':'Paste your free API key'}"></div>
         <div class="btn-row"><button class="btn btn-primary" data-settings-action="save-ocr-key">Save key</button><button class="btn btn-secondary" data-settings-action="test-ocr">Test OCR</button>${hasOcrKey?'<button class="btn btn-secondary" data-settings-action="clear-ocr-key">Remove key</button>':''}</div>
         <p class="small muted">Need a key? <a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a>. Screenshot images are sent to OCR.space only when you choose Upload cart screenshots.</p>

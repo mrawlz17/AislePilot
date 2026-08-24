@@ -1,16 +1,17 @@
-# Grocery Companion v0.3.4
+# Grocery Companion v0.3.5
 
 Reliability-first Walmart and Sam's Club shopping companion.
 
-## What changed in v0.3.4
+## What changed in v0.3.5
 
-- Shopping category order is now fixed for every store and is no longer editable in Settings.
-- The universal shopping order is: Personal Care → Other → Household → Dairy → Drinks → Pantry → Meat → Frozen → Bakery → Deli → Produce.
-- Older saved/custom store routes are ignored on load so the same order is always used at Walmart and Sam's Club.
-- Multi-quantity items now trigger a targeted second OCR pass of the price column.
-- For quantity items, the displayed total price is treated as authoritative and quantity is used to derive the unit price.
-- A visible “$X.XX ea” value is used only when it mathematically reconciles to the verified displayed total.
-- Existing paced multi-screenshot processing, retry behavior, duplicate protection, and review-before-import remain unchanged.
+- Shop view is now a dense checklist instead of a stack of large cards.
+- The large app header is hidden while actively shopping to recover vertical screen space.
+- The sticky shopping status area is reduced to one compact line plus a 4 px progress bar.
+- Product rows are approximately 46 px minimum height with smaller 30 px check controls.
+- Product names are capped at two lines so unusually long Walmart descriptions cannot make a single item excessively tall.
+- The duplicated line-total value was removed from the metadata line; the total remains visible at the right edge.
+- Category headers and spacing are substantially tightened.
+- OCR, price reconciliation, fixed shopping order, batch pacing, duplicate detection, and local data behavior are unchanged from v0.3.4.
 
 ## Screenshot OCR setup
 
@@ -43,12 +44,12 @@ Trips, item history, learned categories, and preferences remain in browser local
 
 ## Deployment
 
-Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.3.4** before testing.
+Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.3.5** before testing.
 
 The release package contains deployment/use files only; no internal QA artifacts are included.
 
 
-## v0.3.4 reliability changes
-- Fixed shopping order is the only route for both stores.
-- Cache-busted app assets so a GitHub Pages update cannot silently run an older app.js.
-- Quantity items use a lossless, high-accuracy OCR Engine 3 verification pass and mathematical reconciliation of total vs. each price.
+## v0.3.5 reliability notes
+- Screenshot OCR and quantity-price verification are unchanged from the passing v0.3.4 regression build.
+- Fixed shopping order remains the only route for both stores.
+- Versioned app assets remain cache-busted for GitHub Pages reliability.
