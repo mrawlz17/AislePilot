@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.2.5';
+  const APP_VERSION = '0.2.6';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
 
@@ -731,7 +731,7 @@
     }));
   }
 
-  const OCR_CACHE = 'grocery-ocr-v0.2.5';
+  const OCR_CACHE = 'grocery-ocr-v0.2.6';
   const OCR_FILES = [
     {
       key:'api', label:'Tesseract API', local:'./ocr/tesseract.min.js', minBytes:50000,
@@ -752,33 +752,11 @@
       ]
     },
     {
-      key:'core-basic', label:'OCR core (basic LSTM)', local:'./ocr/tesseract-core-lstm.wasm.js', minBytes:2500000,
+      key:'core-basic', label:'OCR core (compatibility LSTM)', local:'./ocr/tesseract-core-lstm.wasm.js', minBytes:2500000,
       type:'application/javascript; charset=utf-8',
       remotes:[
-        {label:'GitHub raw',url:'https://raw.githubusercontent.com/ShinobuMiya/x-auto-translator/92d5b33975e3759c84b3b593948ca273ab9709f0/tesseract-core-lstm.wasm.js'},
-        {label:'jsDelivr',url:'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.1.2/tesseract-core-lstm.wasm.js'}
-      ]
-    },
-    {
-      key:'core-simd', label:'OCR core (SIMD LSTM)', local:'./ocr/tesseract-core-simd-lstm.wasm.js', minBytes:2500000,
-      type:'application/javascript; charset=utf-8',
-      remotes:[
-        {label:'GitHub raw',url:'https://raw.githubusercontent.com/ShinobuMiya/x-auto-translator/92d5b33975e3759c84b3b593948ca273ab9709f0/tesseract-core-simd-lstm.wasm.js'},
-        {label:'jsDelivr',url:'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.1.2/tesseract-core-simd-lstm.wasm.js'}
-      ]
-    },
-    {
-      key:'core-relaxed', label:'OCR core (relaxed SIMD LSTM)', local:'./ocr/tesseract-core-relaxedsimd-lstm.wasm.js', minBytes:2500000,
-      type:'application/javascript; charset=utf-8',
-      remotes:[
-        {label:'GitHub raw',url:'https://raw.githubusercontent.com/ShinobuMiya/x-auto-translator/92d5b33975e3759c84b3b593948ca273ab9709f0/tesseract-core-relaxedsimd-lstm.wasm.js'}
-      ]
-    },
-    {
-      key:'language', label:'English OCR model', local:'./ocr/eng.traineddata', minBytes:2500000,
-      type:'application/octet-stream',
-      remotes:[
-        {label:'GitHub tessdata_fast',url:'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/eng.traineddata'}
+        {label:'GitHub raw',url:'https://raw.githubusercontent.com/naptha/tesseract.js-core/v7.0.0/tesseract-core-lstm.wasm.js'},
+        {label:'jsDelivr',url:'https://cdn.jsdelivr.net/npm/tesseract.js-core@7.0.0/tesseract-core-lstm.wasm.js'}
       ]
     }
   ];
@@ -822,7 +800,7 @@
 
     let controller=navigator.serviceWorker.controller;
     let version=await getServiceWorkerVersion(controller);
-    if(version==='0.2.5') return registration;
+    if(version==='0.2.6') return registration;
 
     try { registration.waiting?.postMessage({type:'SKIP_WAITING'}); } catch {}
     await new Promise(resolve=>{
@@ -833,7 +811,7 @@
     });
     controller=navigator.serviceWorker.controller;
     version=await getServiceWorkerVersion(controller);
-    if(version!=='0.2.5') throw new Error(`OCR service worker ${version||'unknown'} is controlling the page; v0.2.5 is required. Reload once and retry.`);
+    if(version!=='0.2.6') throw new Error(`OCR service worker ${version||'unknown'} is controlling the page; v0.2.6 is required. Reload once and retry.`);
     return registration;
   }
 
@@ -920,28 +898,71 @@
     await ensureOcrServiceWorker(onAttempt);
     const runtimeFiles=OCR_FILES.filter(f=>f.key!=='api');
     for(const file of runtimeFiles) await cacheOcrFile(file,onAttempt);
-    onAttempt?.('Verifying local OCR runtime…');
-    for(const file of runtimeFiles) await verifyLocalOcrFile(file.local,file.minBytes);
+    onAttempt?.('Verifying cached OCR runtime…');
+    for(const file of runtimeFiles) {
+      const cache=await caches.open(OCR_CACHE);
+      const response=await cache.match(new Request(appAssetUrl(file.local),{method:'GET'}));
+      if(!response) throw new Error(`${file.label} is missing from local OCR storage`);
+      const body=await response.clone().arrayBuffer();
+      if(body.byteLength<file.minBytes) throw new Error(`${file.label} is incomplete (${body.byteLength.toLocaleString()} bytes)`);
+    }
+  }
+
+  async function cachedOcrText(key) {
+    const file=OCR_FILES.find(f=>f.key===key);
+    if(!file) throw new Error(`Unknown OCR asset: ${key}`);
+    const cache=await caches.open(OCR_CACHE);
+    const response=await cache.match(new Request(appAssetUrl(file.local),{method:'GET'}));
+    if(!response) throw new Error(`${file.label} is missing from local OCR storage`);
+    const text=await response.text();
+    if(text.length<file.minBytes*0.8) throw new Error(`${file.label} did not contain the expected script data`);
+    return text;
   }
 
   async function createOcrWorker(Tesseract,onAttempt,onLog) {
     await prepareLocalOcrRuntime(onAttempt);
     let worker=null;
+    let workerBlobUrl='';
+    let coreBlobUrl='';
     try {
-      onAttempt?.('Starting OCR worker from local files…');
+      // Safari was failing while constructing/importing a Worker from our
+      // service-worker-backed pseudo-files. Load the already-downloaded code
+      // into memory and create real blob-backed scripts instead. No worker or
+      // core request needs to cross a CDN or service-worker boundary.
+      onAttempt?.('Preparing iPhone-compatible OCR worker…');
+      const [workerCode,coreCode]=await Promise.all([
+        cachedOcrText('worker'),
+        cachedOcrText('core-basic')
+      ]);
+      workerBlobUrl=URL.createObjectURL(new Blob([workerCode],{type:'application/javascript'}));
+      coreBlobUrl=URL.createObjectURL(new Blob([coreCode],{type:'application/javascript'}));
+
+      onAttempt?.('Starting in-memory OCR worker…');
       worker=await Tesseract.createWorker('eng',1,{
-        workerPath:appAssetUrl('./ocr/worker.min.js'),
-        corePath:appAssetUrl('./ocr'),
-        langPath:appAssetUrl('./ocr'),
+        workerPath:workerBlobUrl,
+        // Tesseract checks whether corePath ends in "js". A fragment keeps the
+        // Blob URL intact while making it a specific script path, preventing
+        // Tesseract from appending a core filename to the Blob URL.
+        corePath:`${coreBlobUrl}#core.js`,
+        langPath:'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main',
         gzip:false,
         workerBlobURL:false,
         logger:m=>onLog?.(m),
         errorHandler:err=>console.error('OCR worker error',err)
       });
-      return {worker,source:{label:'same-origin cached OCR'}};
+      return {
+        worker,
+        source:{label:'in-memory Safari compatibility OCR'},
+        cleanup:()=>{
+          if(workerBlobUrl) URL.revokeObjectURL(workerBlobUrl);
+          if(coreBlobUrl) URL.revokeObjectURL(coreBlobUrl);
+        }
+      };
     } catch(err) {
       try { await worker?.terminate?.(); } catch {}
-      throw new Error(`Local OCR worker could not start: ${String(err?.message||err||'unknown error')}`);
+      if(workerBlobUrl) URL.revokeObjectURL(workerBlobUrl);
+      if(coreBlobUrl) URL.revokeObjectURL(coreBlobUrl);
+      throw new Error(`In-memory OCR worker could not start: ${String(err?.message||err||'unknown error')}`);
     }
   }
 
@@ -967,6 +988,7 @@
     const safeWidth=(el,pct)=>{ if(el?.isConnected) el.style.width=`${clamp(pct,2,100)}%`; };
 
     let worker=null;
+    let workerCleanup=null;
     let diagnosticStage='Preparing OCR';
     const reportStage=msg=>{ diagnosticStage=String(msg||diagnosticStage); safeText(detail,diagnosticStage); };
     try {
@@ -978,6 +1000,7 @@
         m=>{ if (m.status && m.status!=='recognizing text') safeText(detail,m.status); }
       );
       worker=workerResult.worker;
+      workerCleanup=workerResult.cleanup||null;
       safeText(detail,`OCR engine ready (${workerResult.source.label}).`);
 
       const allItems=[];
@@ -1042,6 +1065,7 @@
       `);
     } finally {
       try { if(worker) await worker.terminate(); } catch {}
+      try { workerCleanup?.(); } catch {}
     }
   }
 

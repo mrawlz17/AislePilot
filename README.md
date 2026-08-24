@@ -1,4 +1,4 @@
-# Grocery Companion v0.2.5
+# Grocery Companion v0.2.6
 
 A reliability-first local web app for planning and shopping Walmart and Sam's Club grocery trips.
 
@@ -27,9 +27,9 @@ Select one or more Walmart or Sam's Club cart screenshots. Grocery Companion OCR
 
 The parser is designed to ignore unit-price text, crossed-out old prices, savings amounts, order headers, and quantity metadata that should not become grocery items.
 
-### v0.2.5 iPhone OCR startup change
+### v0.2.6 iPhone OCR startup change
 
-V0.2.5 removes the remaining blob-script startup path that could fail with a generic `Load failed` on iPhone Safari:
+V0.2.6 removes the remaining blob-script startup path that could fail with a generic `Load failed` on iPhone Safari:
 
 - The Tesseract API is downloaded as data, stored under a Grocery Companion same-origin URL, verified, and then loaded through a normal same-origin `<script>` request. Safari is no longer asked to execute a dynamically-created `blob:` OCR library.
 - GitHub Raw is the primary pinned source for the Tesseract API, worker, and LSTM core files; CDN sources are secondary fallbacks.
@@ -59,8 +59,15 @@ Upload these files to the root of the GitHub repository:
 
 Then enable GitHub Pages for the repository branch/folder containing the files.
 
-After replacing an older Grocery Companion release, reload Safari once and verify **Settings → Version = 0.2.5** before testing screenshot import.
+After replacing an older Grocery Companion release, reload Safari once and verify **Settings → Version = 0.2.6** before testing screenshot import.
 
 ## Data note
 
 Grocery Companion stores trip/list data in browser localStorage. OCR runtime files use browser Cache Storage. Use **Settings → Export backup** before clearing browser/site data or moving to another device.
+
+
+## v0.2.6 OCR startup change
+
+On iPhone Safari, v0.2.5 successfully downloaded and verified the OCR assets but failed at the exact point the Web Worker was started. v0.2.6 no longer asks Safari to create the OCR worker or import the OCR core from service-worker-backed pseudo-files. Instead it reads the already-downloaded worker/core scripts into memory and starts them from Blob URLs, while using the non-SIMD LSTM core for maximum compatibility.
+
+This release intentionally changes only OCR startup. The screenshot parser and grocery workflow are otherwise unchanged.
