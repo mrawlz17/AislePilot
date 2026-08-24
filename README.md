@@ -1,20 +1,16 @@
-# Grocery Companion v0.3.2
+# Grocery Companion v0.3.3
 
 Reliability-first Walmart and Sam's Club shopping companion.
 
-## What changed in v0.3.2
+## What changed in v0.3.3
 
-- Keeps multi-select: choose up to 20 cart screenshots at once.
-- Processes screenshots sequentially in groups of three with an 8-second cooldown between groups.
-- Spaces normal OCR requests by 2.2 seconds instead of sending them back-to-back.
-- Uses the OCR.space API key in the request header, matching the service documentation.
-- Compresses each screenshot below the free API's 1 MB upload limit before sending it.
-- Uses one OCR request per screenshot in normal cases; a separate price-column pass runs only if the full-screen overlay finds no usable prices.
-- Retries temporary service failures with 5-second and 12-second backoff.
-- If the OCR service itself is failing, the batch stops instead of repeatedly sending the remaining screenshots.
-- The failure dialog now shows the actual first OCR error so service outages, HTTP failures, quota errors, and file-size problems are distinguishable.
-- Any screenshots successfully recognized before a later service failure are still offered for review.
-- Cross-batch duplicate protection remains enabled.
+- Shopping category order is now fixed for every store and is no longer editable in Settings.
+- The universal shopping order is: Personal Care → Other → Household → Dairy → Drinks → Pantry → Meat → Frozen → Bakery → Deli → Produce.
+- Older saved/custom store routes are ignored on load so the same order is always used at Walmart and Sam's Club.
+- Multi-quantity items now trigger a targeted second OCR pass of the price column.
+- For quantity items, the displayed total price is treated as authoritative and quantity is used to derive the unit price.
+- A visible “$X.XX ea” value is used only when it mathematically reconciles to the verified displayed total.
+- Existing paced multi-screenshot processing, retry behavior, duplicate protection, and review-before-import remain unchanged.
 
 ## Screenshot OCR setup
 
@@ -25,16 +21,28 @@ Screenshot import uses OCR.space. The API key remains stored only in this browse
 3. Tap **Test OCR** if you need to verify the connection.
 4. Open **Plan → Upload cart screenshots** and select up to 20 screenshots.
 
-## Import behavior
+## Shopping order
 
-The app does not add OCR results directly to the grocery list. It always opens a review screen first. If a screenshot fails, the review screen reports how many failed so those images can be retried separately without losing the successful results.
+Every Walmart and Sam's Club trip is sorted in this fixed order:
+
+1. Personal Care
+2. Other
+3. Household
+4. Dairy
+5. Drinks
+6. Pantry
+7. Meat
+8. Frozen
+9. Bakery
+10. Deli
+11. Produce
 
 ## Data
 
-Trips, item history, routes, learned categories, and preferences remain in browser local storage. Export a backup before clearing browser data or moving devices.
+Trips, item history, learned categories, and preferences remain in browser local storage. Export a backup before clearing browser data or moving devices.
 
 ## Deployment
 
-Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.3.2** before testing.
+Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.3.3** before testing.
 
 The release package contains deployment/use files only; no internal QA artifacts are included.

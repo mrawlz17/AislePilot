@@ -1,11 +1,12 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.3.2';
+  const APP_VERSION = '0.3.3';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const OCR_KEY_STORAGE = 'grocery-companion-ocr-api-key';
   const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
-  const DEFAULT_CATEGORIES = ['Produce','Bakery','Deli','Meat','Pantry','Drinks','Dairy','Frozen','Household','Personal Care','Other'];
+  const SHOP_ROUTE = ['Personal Care','Other','Household','Dairy','Drinks','Pantry','Meat','Frozen','Bakery','Deli','Produce'];
+  const DEFAULT_CATEGORIES = SHOP_ROUTE;
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -40,12 +41,13 @@
     const base = defaultState();
     if (!raw || typeof raw !== 'object') return base;
     const state = { ...base, ...raw };
-    state.storeProfiles = { ...base.storeProfiles, ...(raw.storeProfiles || {}) };
-    for (const store of ['Walmart', "Sam's Club"]) {
-      const route = state.storeProfiles?.[store]?.route;
-      state.storeProfiles[store] = { route: Array.isArray(route) && route.length ? [...new Set(route.map(String))] : [...DEFAULT_CATEGORIES] };
-      if (!state.storeProfiles[store].route.includes('Other')) state.storeProfiles[store].route.push('Other');
-    }
+    // Shopping order is intentionally fixed for every store. Older backups may
+    // contain custom routes; they are ignored so Walmart and Sam's Club always
+    // use the same proven walk order.
+    state.storeProfiles = {
+      Walmart: { route: [...SHOP_ROUTE] },
+      "Sam's Club": { route: [...SHOP_ROUTE] }
+    };
     state.history = Array.isArray(raw.history) ? raw.history.filter(v => v && typeof v === 'object').map(t => sanitizeTrip(t, true)) : [];
     state.itemLibrary = raw.itemLibrary && typeof raw.itemLibrary === 'object' ? raw.itemLibrary : {};
     state.settings = { ...base.settings, ...(raw.settings || {}) };
@@ -135,14 +137,12 @@
   function pickedCount(trip = state.currentTrip) { return trip ? trip.items.filter(i=>i.picked).length : 0; }
 
   function categoryOptions(store, selected) {
-    const route = state.storeProfiles[store]?.route || DEFAULT_CATEGORIES;
-    return route.map(c => `<option value="${escapeHtml(c)}" ${c===selected?'selected':''}>${escapeHtml(c)}</option>`).join('');
+    return SHOP_ROUTE.map(c => `<option value="${escapeHtml(c)}" ${c===selected?'selected':''}>${escapeHtml(c)}</option>`).join('');
   }
 
   function routeIndex(store, category) {
-    const route = state.storeProfiles[store]?.route || DEFAULT_CATEGORIES;
-    const ix = route.indexOf(category);
-    return ix < 0 ? route.length : ix;
+    const ix = SHOP_ROUTE.indexOf(category);
+    return ix < 0 ? SHOP_ROUTE.length : ix;
   }
 
   function sortItemsForStore(items, store) {
@@ -219,7 +219,7 @@
             <button class="btn btn-secondary" data-home-action="new">Start over</button>
           </div>
         ` : `
-          <p class="muted">Build a budgeted Walmart or Sam's Club trip, then shop it in your actual store-route order.</p>
+          <p class="muted">Build a budgeted Walmart or Sam's Club trip, then shop it in your fixed shopping order.</p>
           <button class="btn btn-primary btn-block" data-home-action="new">New grocery trip</button>
         `}
       </section>
@@ -230,7 +230,7 @@
           <div>1. Set store and budget.</div>
           <div>2. Upload Walmart/Sam's cart screenshots.</div>
           <div>3. Review OCR results, categories, and prices.</div>
-          <div>4. Shop in your saved store route.</div>
+          <div>4. Shop in your standard category order.</div>
           <div>5. Save the completed trip to history.</div>
         </div>
       </section>
@@ -346,17 +346,16 @@
         <div class="field"><label>Default store</label><select id="defaultStore"><option ${state.settings.defaultStore==='Walmart'?'selected':''}>Walmart</option><option ${state.settings.defaultStore==="Sam's Club"?'selected':''}>Sam's Club</option></select></div>
         <div class="field"><label>Default two-week budget</label><input id="defaultBudget" type="number" min="0" step="0.01" inputmode="decimal" value="${state.settings.defaultBudget || ''}" placeholder="0.00"></div>
       </section>
-      ${['Walmart',"Sam's Club"].map(store => `<section class="card"><h2>${escapeHtml(store)} store route</h2><p class="muted small">Move categories into the order you normally walk this store.</p><div>${state.storeProfiles[store].route.map((cat,ix,arr)=>`<div class="route-row"><strong>${ix+1}. ${escapeHtml(cat)}</strong><div class="route-actions"><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="up" ${ix===0?'disabled':''}>↑</button><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="down" ${ix===arr.length-1?'disabled':''}>↓</button></div></div>`).join('')}</div></section>`).join('')}
       <section class="card">
         <h2>Screenshot OCR</h2>
-        <p class="muted small">Version 0.3.2 uses OCR.space with paced multi-screenshot batches, smaller uploads, exact failure reporting, and cross-batch duplicate protection. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
+        <p class="muted small">Version 0.3.3 keeps paced multi-screenshot batches and adds targeted price verification for quantity items. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
         <div class="field"><label>OCR.space API key</label><input id="ocrApiKey" type="password" autocomplete="off" placeholder="${hasOcrKey?'API key saved on this device':'Paste your free API key'}"></div>
         <div class="btn-row"><button class="btn btn-primary" data-settings-action="save-ocr-key">Save key</button><button class="btn btn-secondary" data-settings-action="test-ocr">Test OCR</button>${hasOcrKey?'<button class="btn btn-secondary" data-settings-action="clear-ocr-key">Remove key</button>':''}</div>
         <p class="small muted">Need a key? <a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a>. Screenshot images are sent to OCR.space only when you choose Upload cart screenshots.</p>
       </section>
       <section class="card">
         <h2>Data</h2>
-        <p class="muted small">Trips, item history, routes, and preferences are stored locally in this browser. Export a backup before clearing browser data or changing devices.</p>
+        <p class="muted small">Trips, item history, and preferences are stored locally in this browser. Export a backup before clearing browser data or changing devices.</p>
         <div class="btn-row"><button class="btn btn-secondary" data-settings-action="export">Export backup</button><label class="btn btn-secondary" style="display:inline-flex;align-items:center">Import backup<input id="backupImport" type="file" accept="application/json" hidden></label><button class="btn btn-danger" data-settings-action="reset">Reset app</button></div>
         <p class="small muted" style="margin-bottom:0">Version ${APP_VERSION}</p>
       </section>
@@ -372,7 +371,7 @@
     }
     if (view === 'plan') {
       $('[data-plan-action="new"]')?.addEventListener('click', newTripFlow);
-      $('#tripStore')?.addEventListener('change', e => commit(s => { s.currentTrip.store = e.target.value; s.currentTrip.items.forEach(i => { if (!s.storeProfiles[e.target.value].route.includes(i.category)) i.category='Other'; }); }, 'Store updated'));
+      $('#tripStore')?.addEventListener('change', e => commit(s => { s.currentTrip.store = e.target.value; s.currentTrip.items.forEach(i => { if (!SHOP_ROUTE.includes(i.category)) i.category='Other'; }); }, 'Store updated'));
       $('#tripDate')?.addEventListener('change', e => commit(s => s.currentTrip.date = e.target.value || todayISO()));
       $('#tripBudget')?.addEventListener('change', e => commit(s => s.currentTrip.budget = Math.max(0,num(e.target.value))));
       $('[data-plan-action="add"]')?.addEventListener('click', () => openItemModal());
@@ -395,7 +394,6 @@
     if (view === 'settings') {
       $('#defaultStore')?.addEventListener('change', e => commit(s => s.settings.defaultStore=e.target.value));
       $('#defaultBudget')?.addEventListener('change', e => commit(s => s.settings.defaultBudget=Math.max(0,num(e.target.value))));
-      $$('[data-route-dir]').forEach(b => b.addEventListener('click', () => moveRoute(b.dataset.routeStore, Number(b.dataset.routeIndex), b.dataset.routeDir)));
       $('[data-settings-action="save-ocr-key"]')?.addEventListener('click', () => {
         const value=$('#ocrApiKey')?.value?.trim()||'';
         if(!value) return toast('Paste your OCR API key first');
@@ -622,6 +620,15 @@
     return {items:kept,removed};
   }
 
+  function hasMultiQuantity(lines) {
+    for (const line of (lines||[])) {
+      if (/multipack\s+quantity/i.test(line.text||'')) continue;
+      const m=String(line.text||'').match(/(?:^|[^a-z])qty\s*[:x-]?\s*(\d{1,2})\b/i);
+      if (m && Math.max(1,Math.round(num(m[1],1)))>1) return true;
+    }
+    return false;
+  }
+
   function screenshotPriceCandidates(lines,width,source) {
     const out=[];
     for (const line of (lines||[])) {
@@ -715,14 +722,36 @@
 
       let unitPrice=null;
       if (qty>1) {
-        for (const line of [...priceLines,...fullLines]) {
-          const cy=lineCenterY(line);
-          if (cy<py || cy>Math.min(py+185,regionEnd) || num(line.x1,0)<width*0.80) continue;
-          const each=line.text.match(/\$\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\s*(?:ea|each)\b/i);
-          if (!each) continue;
-          const value=num(`${each[1]}.${each[2]}`,0);
-          if (value>0 && Math.abs(value*qty-priceLine.price)<=0.06) { unitPrice=value; break; }
+        // Quantity items get a dedicated price-column verification pass. The
+        // displayed total is authoritative; qty is then used to derive the unit
+        // price. A visible "$X.XX ea" value is accepted only when it reconciles
+        // to that verified total. This prevents one bad OCR digit from changing
+        // the projected trip total.
+        let verifiedTotal=priceLine.price;
+        const verifiedTotals=screenshotPriceCandidates(priceLines,width,'price')
+          .filter(c=>Math.abs(lineCenterY(c)-py)<=34)
+          .sort((a,b)=>{
+            const yDelta=Math.abs(lineCenterY(a)-py)-Math.abs(lineCenterY(b)-py);
+            if (Math.abs(yDelta)>2) return yDelta;
+            return num(b.priceConfidence,0)-num(a.priceConfidence,0);
+          });
+        if (verifiedTotals.length) verifiedTotal=verifiedTotals[0].price;
+
+        const derived=Math.round((verifiedTotal/qty)*100)/100;
+        const eachCandidates=[];
+        for (const [sourceLines,source] of [[priceLines,'price'],[fullLines,'full']]) {
+          for (const line of sourceLines) {
+            const cy=lineCenterY(line);
+            if (cy<py || cy>Math.min(py+185,regionEnd) || num(line.x1,0)<width*0.80) continue;
+            const each=line.text.match(/\$\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\s*(?:ea|each)\b/i);
+            if (!each) continue;
+            const value=num(`${each[1]}.${each[2]}`,0);
+            if (value>0) eachCandidates.push({value,source,confidence:num(line.confidence,0)});
+          }
         }
+        eachCandidates.sort((a,b)=>(b.source==='price'?1:0)-(a.source==='price'?1:0) || b.confidence-a.confidence);
+        const reconciled=eachCandidates.find(c=>Math.abs(c.value*qty-verifiedTotal)<=0.06);
+        unitPrice=reconciled ? reconciled.value : derived;
       }
       if (unitPrice==null) unitPrice=Math.round((priceLine.price/qty)*100)/100;
 
@@ -904,14 +933,14 @@
     }
     const full=await ocrSpaceRecognize(fullBlob,apiKey,'cart-full');
 
-    // The structured overlay normally contains enough coordinates to read Walmart's
-    // right-hand price column. Use a second OCR call only when the first pass does
-    // not yield a reasonable number of price candidates. This roughly halves API
-    // traffic on normal batches and makes large screenshot imports more reliable.
+    // Most screenshots use one OCR request. Screenshots containing Qty > 1 get
+    // a targeted second pass over the price column so displayed totals and unit
+    // prices can be mathematically reconciled without doubling every API request.
     let priceLines=[];
     const fullPriceCount=screenshotPriceCandidates(full.lines,width,'full').length;
-    if(fullPriceCount<1) {
-      onStage?.('Verifying price column…');
+    const multiQty=hasMultiQuantity(full.lines);
+    if(fullPriceCount<1 || multiQty) {
+      onStage?.(multiQty ? 'Verifying quantity-item prices…' : 'Verifying price column…');
       const crop=createPriceColumnCanvas(img);
       const cropBlob=await canvasToBlob(crop.canvas,'image/jpeg',0.88);
       await wait(1800);
@@ -1152,15 +1181,6 @@
       <div class="metric-grid"><div class="metric"><div class="label">Budget</div><div class="value">${money(t.budget)}</div></div><div class="metric"><div class="label">Actual</div><div class="value">${money(t.actualTotal ?? tripTotal(t))}</div></div></div>
       <div style="margin-top:14px">${sortItemsForStore(t.items,t.store).map(i=>`<div class="history-row"><div><strong>${escapeHtml(i.name)}</strong><div class="small muted">${i.qty} × ${money(i.unitPrice)} · ${escapeHtml(i.category)}</div></div><strong>${money(i.qty*i.unitPrice)}</strong></div>`).join('')}</div>
     `);
-  }
-
-  function moveRoute(store,index,dir) {
-    commit(s => {
-      const arr=s.storeProfiles[store].route;
-      const target=dir==='up'?index-1:index+1;
-      if(target<0||target>=arr.length) return;
-      [arr[index],arr[target]]=[arr[target],arr[index]];
-    });
   }
 
   function exportBackup() {
