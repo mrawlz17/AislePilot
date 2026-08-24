@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.3.0';
+  const APP_VERSION = '0.3.1';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const OCR_KEY_STORAGE = 'grocery-companion-ocr-api-key';
   const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
@@ -154,16 +154,29 @@
 
   function libraryKey(store, name) { return `${store}::${name.trim().toLowerCase()}`; }
   function suggestCategory(store, name) {
+    const n = name.toLowerCase();
+
+    // High-confidence rules run before learned categories so a bad OCR-era category
+    // cannot permanently poison obvious products. User corrections are still learned
+    // for products that do not match one of these unambiguous rules.
+    const forced = [
+      [['frozen','(frozen)'], 'Frozen'],
+      [['cat litter','kitty litter','clumping litter'], 'Household'],
+      [['ground beef','beef chuck','steak','pork chop','chicken breast'], 'Meat'],
+      [['half and half','half & half','chobani','yogurt','sour cream','parmesan cheese','cheddar cheese','whole milk','vitamin d milk','white eggs'], 'Dairy'],
+      [['tuna','spam classic','hamburger helper','infant formula','toddler snacks','banana puffs','taco shells'], 'Pantry']
+    ];
+    for (const [terms, category] of forced) if (terms.some(t=>n.includes(t))) return category;
+
     const saved = state.itemLibrary[libraryKey(store,name)];
     if (saved?.category) return saved.category;
-    const n = name.toLowerCase();
+
     const rules = [
       [['banana','apple','lettuce','tomato','onion','potato','avocado','berry','berries','grape','orange','fruit','vegetable'], 'Produce'],
       [['bread','bun','roll','tortilla','bagel','muffin'], 'Bakery'],
       [['chicken','beef','steak','pork','bacon','sausage','turkey','ham','meat'], 'Meat'],
       [['milk','egg','cheese','yogurt','butter','cream'], 'Dairy'],
-      [['frozen','pizza','ice cream','fries','waffle'], 'Frozen'],
-      [['soda','water','juice','gatorade','drink','coffee'], 'Drinks'],
+      [['soda','water','juice','gatorade','electrolyte','drink','coffee'], 'Drinks'],
       [['detergent','paper towel','toilet paper','trash bag','dish soap','cleaner','cat litter','litter'], 'Household'],
       [['shampoo','soap','toothpaste','deodorant','antiperspirant','razor','cotton swab','cold and flu','cold & flu'], 'Personal Care']
     ];
@@ -253,7 +266,7 @@
           <button class="btn btn-secondary" data-plan-action="add">Add item</button>
           <button class="btn btn-secondary" data-plan-action="paste">Paste cart text</button>
         </div>
-        <p class="import-note" style="margin-bottom:0">Upload one or more screenshots from the Walmart or Sam's Club cart. The app reads them, removes likely overlap duplicates, and requires a review before adding anything to your list. Screenshot OCR uses OCR.space and needs a free API key the first time.</p>
+        <p class="import-note" style="margin-bottom:0">Upload up to 20 screenshots from the Walmart or Sam's Club cart in one batch. The app queues them one at a time, retries temporary OCR failures, removes likely overlap duplicates—including duplicates from earlier batches—and requires a review before adding anything to your list.</p>
       </section>
 
       <section class="card">
@@ -336,7 +349,7 @@
       ${['Walmart',"Sam's Club"].map(store => `<section class="card"><h2>${escapeHtml(store)} store route</h2><p class="muted small">Move categories into the order you normally walk this store.</p><div>${state.storeProfiles[store].route.map((cat,ix,arr)=>`<div class="route-row"><strong>${ix+1}. ${escapeHtml(cat)}</strong><div class="route-actions"><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="up" ${ix===0?'disabled':''}>↑</button><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="down" ${ix===arr.length-1?'disabled':''}>↓</button></div></div>`).join('')}</div></section>`).join('')}
       <section class="card">
         <h2>Screenshot OCR</h2>
-        <p class="muted small">Version 0.3 uses OCR.space instead of running Tesseract inside iPhone Safari. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
+        <p class="muted small">Version 0.3.1 uses OCR.space with queued multi-screenshot imports, retry handling, and cross-batch duplicate protection. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
         <div class="field"><label>OCR.space API key</label><input id="ocrApiKey" type="password" autocomplete="off" placeholder="${hasOcrKey?'API key saved on this device':'Paste your free API key'}"></div>
         <div class="btn-row"><button class="btn btn-primary" data-settings-action="save-ocr-key">Save key</button><button class="btn btn-secondary" data-settings-action="test-ocr">Test OCR</button>${hasOcrKey?'<button class="btn btn-secondary" data-settings-action="clear-ocr-key">Remove key</button>':''}</div>
         <p class="small muted">Need a key? <a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a>. Screenshot images are sent to OCR.space only when you choose Upload cart screenshots.</p>
@@ -506,7 +519,24 @@
   }
 
   function normalizeItemIdentity(name) {
-    return String(name).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+    return String(name).normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+  }
+
+  function compactItemIdentity(name) {
+    return normalizeItemIdentity(name).replace(/\s+/g,'');
+  }
+
+  function likelySameItem(a,b) {
+    const totalA=Math.round(num(a?.unitPrice,0)*Math.max(1,num(a?.qty,1))*100)/100;
+    const totalB=Math.round(num(b?.unitPrice,0)*Math.max(1,num(b?.qty,1))*100)/100;
+    if (Math.abs(totalA-totalB)>0.03) return false;
+    const aa=normalizeItemIdentity(a?.name||''), bb=normalizeItemIdentity(b?.name||'');
+    const ac=compactItemIdentity(a?.name||''), bc=compactItemIdentity(b?.name||'');
+    if (!ac || !bc) return false;
+    if (ac===bc) return true;
+    const shorter=Math.min(ac.length,bc.length), longer=Math.max(ac.length,bc.length);
+    if (shorter>=14 && shorter/longer>=0.72 && (ac.includes(bc)||bc.includes(ac))) return true;
+    return tokenSimilarity(aa,bb)>=0.88;
   }
 
   function flattenOcrBlocks(blocks) {
@@ -560,15 +590,9 @@
   function dedupeScreenshotItems(items) {
     const out=[];
     for (const item of items) {
-      const total=Math.round(item.unitPrice*item.qty*100)/100;
       let matchIndex=-1;
       for (let i=0;i<out.length;i++) {
-        const existing=out[i];
-        const existingTotal=Math.round(existing.unitPrice*existing.qty*100)/100;
-        if (Math.abs(existingTotal-total)>0.03) continue;
-        const a=normalizeItemIdentity(existing.name), b=normalizeItemIdentity(item.name);
-        const similar=(a.length>12 && b.length>12 && (a.includes(b)||b.includes(a))) || tokenSimilarity(a,b)>=0.72;
-        if (similar) { matchIndex=i; break; }
+        if (likelySameItem(out[i],item)) { matchIndex=i; break; }
       }
       if (matchIndex<0) {
         out.push({...item});
@@ -584,6 +608,18 @@
       }
     }
     return out.map(({_qtyDetected,...item})=>item);
+  }
+
+  function removeExistingTripDuplicates(items, trip) {
+    const existing=trip?.items||[];
+    if (!existing.length) return {items,removed:0};
+    const kept=[];
+    let removed=0;
+    for (const item of items) {
+      if (existing.some(old=>likelySameItem(old,item))) removed++;
+      else kept.push(item);
+    }
+    return {items:kept,removed};
   }
 
   function screenshotPriceCandidates(lines,width,source) {
@@ -789,41 +825,55 @@
     return new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('Could not prepare screenshot image')),type,quality));
   }
 
-  async function ocrSpaceRecognize(blob, apiKey, label='screenshot', timeoutMs=75000) {
+  const wait = ms => new Promise(resolve=>setTimeout(resolve,ms));
+
+  async function ocrSpaceRecognize(blob, apiKey, label='screenshot', timeoutMs=75000, maxAttempts=3) {
     if(!apiKey) throw new Error('OCR API key is not configured');
-    const form=new FormData();
-    form.append('apikey',apiKey);
-    form.append('language','eng');
-    form.append('isOverlayRequired','true');
-    form.append('OCREngine','2');
-    form.append('detectOrientation','false');
-    form.append('scale','false');
-    form.append('isTable','false');
-    form.append('file',blob,`${label.replace(/[^a-z0-9_-]+/gi,'-')}.jpg`);
+    let lastError=null;
+    for(let attempt=1;attempt<=maxAttempts;attempt++) {
+      const form=new FormData();
+      form.append('apikey',apiKey);
+      form.append('language','eng');
+      form.append('isOverlayRequired','true');
+      form.append('OCREngine','2');
+      form.append('detectOrientation','false');
+      form.append('scale','false');
+      form.append('isTable','false');
+      form.append('file',blob,`${label.replace(/[^a-z0-9_-]+/gi,'-')}.jpg`);
 
-    const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),timeoutMs);
-    let response;
-    try {
-      response=await fetch(OCR_ENDPOINT,{method:'POST',body:form,signal:controller.signal,cache:'no-store'});
-    } catch(err) {
-      if(err?.name==='AbortError') throw new Error('OCR request timed out');
-      throw new Error(`Could not reach OCR service: ${String(err?.message||err||'network error')}`);
-    } finally { clearTimeout(timer); }
-    if(!response.ok) throw new Error(`OCR service returned HTTP ${response.status}`);
-
-    let data;
-    try { data=await response.json(); }
-    catch { throw new Error('OCR service returned an unreadable response'); }
-    if(data?.IsErroredOnProcessing) {
-      const msg=[data?.ErrorMessage,data?.ErrorDetails].flat().filter(Boolean).join(' · ');
-      throw new Error(msg||'OCR service could not process the image');
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),timeoutMs);
+      try {
+        const response=await fetch(OCR_ENDPOINT,{method:'POST',body:form,signal:controller.signal,cache:'no-store'});
+        if(!response.ok) {
+          const err=new Error(`OCR service returned HTTP ${response.status}`);
+          err.retryable=response.status===429 || response.status>=500;
+          throw err;
+        }
+        let data;
+        try { data=await response.json(); }
+        catch { throw new Error('OCR service returned an unreadable response'); }
+        if(data?.IsErroredOnProcessing) {
+          const msg=[data?.ErrorMessage,data?.ErrorDetails].flat().filter(Boolean).join(' · ') || 'OCR service could not process the image';
+          const err=new Error(msg);
+          err.retryable=/rate|limit|busy|temporar|timeout|server|try again/i.test(msg);
+          throw err;
+        }
+        const parsed=Array.isArray(data?.ParsedResults)?data.ParsedResults[0]:null;
+        if(!parsed) throw new Error('OCR service returned no parsed result');
+        const text=String(parsed?.ParsedText||'');
+        const lines=overlayToLines(parsed?.TextOverlay);
+        return {text,lines};
+      } catch(err) {
+        if(err?.name==='AbortError') { lastError=new Error('OCR request timed out'); lastError.retryable=true; }
+        else if(/^Could not reach OCR service:/.test(String(err?.message||''))) { lastError=err; lastError.retryable=true; }
+        else if(err instanceof TypeError) { lastError=new Error(`Could not reach OCR service: ${String(err?.message||'network error')}`); lastError.retryable=true; }
+        else lastError=err;
+        if(attempt>=maxAttempts || lastError?.retryable===false) throw lastError;
+        await wait(700*attempt);
+      } finally { clearTimeout(timer); }
     }
-    const parsed=Array.isArray(data?.ParsedResults)?data.ParsedResults[0]:null;
-    if(!parsed) throw new Error('OCR service returned no parsed result');
-    const text=String(parsed?.ParsedText||'');
-    const lines=overlayToLines(parsed?.TextOverlay);
-    return {text,lines};
+    throw lastError||new Error('OCR request failed');
   }
 
   async function recognizeScreenshotWithCloud(file, apiKey, onStage) {
@@ -836,14 +886,22 @@
     fullCanvas.width=width; fullCanvas.height=height;
     const fullCtx=fullCanvas.getContext('2d',{alpha:false});
     fullCtx.fillStyle='#fff'; fullCtx.fillRect(0,0,width,height); fullCtx.drawImage(img,0,0,width,height);
-    const fullBlob=await canvasToBlob(fullCanvas);
+    const fullBlob=await canvasToBlob(fullCanvas,'image/jpeg',0.90);
     const full=await ocrSpaceRecognize(fullBlob,apiKey,'cart-full');
 
-    onStage?.('Verifying price column…');
-    const crop=createPriceColumnCanvas(img);
-    const cropBlob=await canvasToBlob(crop.canvas);
-    const price=await ocrSpaceRecognize(cropBlob,apiKey,'cart-prices');
-    const priceLines=mapCropLinesToImage(price.lines,crop);
+    // The structured overlay normally contains enough coordinates to read Walmart's
+    // right-hand price column. Use a second OCR call only when the first pass does
+    // not yield a reasonable number of price candidates. This roughly halves API
+    // traffic on normal batches and makes large screenshot imports more reliable.
+    let priceLines=[];
+    const fullPriceCount=screenshotPriceCandidates(full.lines,width,'full').length;
+    if(fullPriceCount<2) {
+      onStage?.('Verifying price column…');
+      const crop=createPriceColumnCanvas(img);
+      const cropBlob=await canvasToBlob(crop.canvas,'image/jpeg',0.88);
+      const price=await ocrSpaceRecognize(cropBlob,apiKey,'cart-prices');
+      priceLines=mapCropLinesToImage(price.lines,crop);
+    }
 
     return {width,height,fullLines:full.lines,priceLines,text:full.text};
   }
@@ -895,15 +953,15 @@
   }
 
   async function processScreenshotFiles(files) {
-    if(files.length>12) return toast('Choose 12 screenshots or fewer');
+    if(files.length>20) return toast('Choose 20 screenshots or fewer');
     const t=state.currentTrip; if(!t) return;
 
     const apiKey=getOcrApiKey();
     if(!apiKey) return openOcrKeySetup(()=>processScreenshotFiles(files));
 
     const modal=openModal('Reading cart screenshots', `
-      <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'}. Images are sent to OCR.space for text recognition; nothing is added to your grocery list until you approve the review screen.</p>
-      <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Using the product layout and price column separately for a more reliable import.</div></div>
+      <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'}. Grocery Companion queues them one at a time, retries temporary OCR failures, and keeps going if one image fails.</p>
+      <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Nothing is added until you approve the review screen.</div></div>
     `);
     const stage=$('#ocrStage',modal),bar=$('#ocrProgress',modal),detail=$('#ocrDetail',modal);
     const safeText=(el,text)=>{ if(el?.isConnected) el.textContent=text; };
@@ -911,34 +969,47 @@
     let diagnosticStage='Preparing OCR';
     const reportStage=msg=>{ diagnosticStage=String(msg||diagnosticStage); safeText(detail,diagnosticStage); };
 
+    const allItems=[];
+    const fallbackText=[];
+    const failures=[];
     try {
-      const allItems=[];
-      const fallbackText=[];
       for(let ix=0;ix<files.length;ix++) {
         safeText(stage,`Reading screenshot ${ix+1} of ${files.length}`);
         safeWidth(bar,(ix/files.length)*92+4);
-        const result=await recognizeScreenshotWithCloud(files[ix],apiKey,msg=>reportStage(`${files[ix].name||`Screenshot ${ix+1}`} · ${msg}`));
-        fallbackText.push(result.text||'');
-        let parsed=[];
-        if(result.fullLines.length) parsed=parseScreenshotLayout(result.fullLines,result.priceLines,result.width,result.height,t.store);
-        if(!parsed.length) parsed=parseScreenshotText(result.text||'',t.store);
-        allItems.push(...parsed);
+        try {
+          const result=await recognizeScreenshotWithCloud(files[ix],apiKey,msg=>reportStage(`${files[ix].name||`Screenshot ${ix+1}`} · ${msg}`));
+          fallbackText.push(result.text||'');
+          let parsed=[];
+          if(result.fullLines.length) parsed=parseScreenshotLayout(result.fullLines,result.priceLines,result.width,result.height,t.store);
+          if(!parsed.length) parsed=parseScreenshotText(result.text||'',t.store);
+          allItems.push(...parsed);
+        } catch(err) {
+          console.warn(`Screenshot ${ix+1} OCR failed`,err);
+          failures.push({index:ix,name:files[ix].name||`Screenshot ${ix+1}`,error:compactOcrError(err)});
+          reportStage(`Screenshot ${ix+1} failed; continuing with the remaining images…`);
+        }
+        if(ix<files.length-1) await wait(450);
       }
 
       safeText(stage,'Building grocery list…'); safeWidth(bar,97);
       let items=dedupeScreenshotItems(allItems);
       if(!items.length && fallbackText.length) items=parseScreenshotText(fallbackText.join('\n'),t.store);
 
+      const existingCheck=removeExistingTripDuplicates(items,t);
+      items=existingCheck.items;
+
       if(modal?.isConnected) modal.remove();
       if(!items.length) {
-        openModal('No products recognized', `
-          <p>The OCR service read the screenshots, but Grocery Companion could not confidently pair product names with current prices.</p>
-          <p class="small muted">Try screenshots that show each product name and current price together. You can also use Paste cart text as a fallback.</p>
+        const failureText=failures.length?`<p class="small muted">${failures.length} screenshot${failures.length===1?'':'s'} failed during OCR. Try those images again by themselves.</p>`:'';
+        openModal('No new products recognized', `
+          <p>The OCR service did not produce any new products that could be confidently added.</p>
+          ${existingCheck.removed?`<p class="small muted">${existingCheck.removed} likely overlap duplicate${existingCheck.removed===1?' was':'s were'} already in this trip and ${existingCheck.removed===1?'was':'were'} skipped.</p>`:''}
+          ${failureText}
           <button class="btn btn-primary btn-block" id="ocrFallbackPaste">Open paste importer</button>
         `, root=>$('#ocrFallbackPaste',root).addEventListener('click',()=>{root.remove();openPasteImportModal();}));
         return;
       }
-      openImportReview(items,{source:'screenshots'});
+      openImportReview(items,{source:'screenshots',failedCount:failures.length,duplicateCount:existingCheck.removed,totalScreenshots:files.length});
     } catch(err) {
       console.error('Screenshot OCR failed',err);
       if(modal?.isConnected) modal.remove();
@@ -995,8 +1066,14 @@
   function openImportReview(items, options={}) {
     const t=state.currentTrip;
     const fromScreenshots=options.source==='screenshots';
+    const batchNote=fromScreenshots ? [
+      options.totalScreenshots?`${options.totalScreenshots} screenshot${options.totalScreenshots===1?'':'s'} processed`:null,
+      options.duplicateCount?`${options.duplicateCount} overlap duplicate${options.duplicateCount===1?'':'s'} already in this trip skipped`:null,
+      options.failedCount?`${options.failedCount} screenshot${options.failedCount===1?'':'s'} failed and can be retried separately`:null
+    ].filter(Boolean).join(' · ') : '';
     openModal(fromScreenshots?'Review screenshot import':'Review import', `
       <p class="small muted">Nothing is added until you confirm. ${fromScreenshots?'OCR can misread product names, quantities, or prices, so check each row.':'Correct any item that was parsed incorrectly.'}</p>
+      ${batchNote?`<div class="import-note">${escapeHtml(batchNote)}</div>`:''}
       <div id="importRows" class="list">${items.map((i,ix)=>`<div class="card" style="margin:0"><label class="include-row"><input data-import-include="${ix}" type="checkbox" checked><strong>Include item</strong></label><div class="field"><label>Item</label><input data-import-name="${ix}" value="${escapeHtml(i.name)}"></div><div class="grid-2"><div class="field"><label>Qty</label><input data-import-qty="${ix}" type="number" min="1" step="1" value="${i.qty}"></div><div class="field"><label>Unit price</label><input data-import-price="${ix}" type="number" min="0" step="0.01" value="${i.unitPrice || ''}"></div></div><div class="field"><label>Category</label><select data-import-cat="${ix}">${categoryOptions(t.store,i.category)}</select></div></div>`).join('')}</div>
       <button class="btn btn-primary btn-block" id="confirmImport" style="margin-top:12px">Add reviewed items</button>
     `, root => $('#confirmImport',root).addEventListener('click', () => {

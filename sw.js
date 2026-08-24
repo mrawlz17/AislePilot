@@ -1,4 +1,4 @@
-const APP_CACHE='grocery-companion-v0.3.0';
+const APP_CACHE='grocery-companion-v0.3.1';
 const CORE=['./','./index.html','./styles.css','./app.js','./manifest.json','./icon.svg','./icon-180.png','./icon-512.png'];
 
 self.addEventListener('install',event=>event.waitUntil(
