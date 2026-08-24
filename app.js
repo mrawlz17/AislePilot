@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.3.1';
+  const APP_VERSION = '0.3.2';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const OCR_KEY_STORAGE = 'grocery-companion-ocr-api-key';
   const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
@@ -266,7 +266,7 @@
           <button class="btn btn-secondary" data-plan-action="add">Add item</button>
           <button class="btn btn-secondary" data-plan-action="paste">Paste cart text</button>
         </div>
-        <p class="import-note" style="margin-bottom:0">Upload up to 20 screenshots from the Walmart or Sam's Club cart in one batch. The app queues them one at a time, retries temporary OCR failures, removes likely overlap duplicates—including duplicates from earlier batches—and requires a review before adding anything to your list.</p>
+        <p class="import-note" style="margin-bottom:0">Upload up to 20 screenshots from the Walmart or Sam's Club cart in one selection. The app processes them in paced groups of three so the free OCR service is not flooded, retries temporary failures, removes likely overlap duplicates—including duplicates from earlier batches—and requires a review before adding anything to your list.</p>
       </section>
 
       <section class="card">
@@ -349,7 +349,7 @@
       ${['Walmart',"Sam's Club"].map(store => `<section class="card"><h2>${escapeHtml(store)} store route</h2><p class="muted small">Move categories into the order you normally walk this store.</p><div>${state.storeProfiles[store].route.map((cat,ix,arr)=>`<div class="route-row"><strong>${ix+1}. ${escapeHtml(cat)}</strong><div class="route-actions"><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="up" ${ix===0?'disabled':''}>↑</button><button data-route-store="${escapeHtml(store)}" data-route-index="${ix}" data-route-dir="down" ${ix===arr.length-1?'disabled':''}>↓</button></div></div>`).join('')}</div></section>`).join('')}
       <section class="card">
         <h2>Screenshot OCR</h2>
-        <p class="muted small">Version 0.3.1 uses OCR.space with queued multi-screenshot imports, retry handling, and cross-batch duplicate protection. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
+        <p class="muted small">Version 0.3.2 uses OCR.space with paced multi-screenshot batches, smaller uploads, exact failure reporting, and cross-batch duplicate protection. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
         <div class="field"><label>OCR.space API key</label><input id="ocrApiKey" type="password" autocomplete="off" placeholder="${hasOcrKey?'API key saved on this device':'Paste your free API key'}"></div>
         <div class="btn-row"><button class="btn btn-primary" data-settings-action="save-ocr-key">Save key</button><button class="btn btn-secondary" data-settings-action="test-ocr">Test OCR</button>${hasOcrKey?'<button class="btn btn-secondary" data-settings-action="clear-ocr-key">Remove key</button>':''}</div>
         <p class="small muted">Need a key? <a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a>. Screenshot images are sent to OCR.space only when you choose Upload cart screenshots.</p>
@@ -832,35 +832,39 @@
     let lastError=null;
     for(let attempt=1;attempt<=maxAttempts;attempt++) {
       const form=new FormData();
-      form.append('apikey',apiKey);
       form.append('language','eng');
       form.append('isOverlayRequired','true');
       form.append('OCREngine','2');
       form.append('detectOrientation','false');
       form.append('scale','false');
       form.append('isTable','false');
+      form.append('filetype','JPG');
       form.append('file',blob,`${label.replace(/[^a-z0-9_-]+/gi,'-')}.jpg`);
 
       const controller=new AbortController();
       const timer=setTimeout(()=>controller.abort(),timeoutMs);
       try {
-        const response=await fetch(OCR_ENDPOINT,{method:'POST',body:form,signal:controller.signal,cache:'no-store'});
+        const response=await fetch(OCR_ENDPOINT,{method:'POST',headers:{apikey:apiKey},body:form,signal:controller.signal,cache:'no-store'});
         if(!response.ok) {
           const err=new Error(`OCR service returned HTTP ${response.status}`);
-          err.retryable=response.status===429 || response.status>=500;
+          err.httpStatus=response.status;
+          // OCR.space documents 40x responses as service/connection issues rather than quota messages.
+          // 403 in particular can recover on retry, so pace retries instead of hammering the endpoint.
+          err.retryable=response.status===403 || response.status===408 || response.status===429 || response.status>=500;
           throw err;
         }
         let data;
         try { data=await response.json(); }
-        catch { throw new Error('OCR service returned an unreadable response'); }
+        catch { const err=new Error('OCR service returned an unreadable response'); err.retryable=true; throw err; }
         if(data?.IsErroredOnProcessing) {
           const msg=[data?.ErrorMessage,data?.ErrorDetails].flat().filter(Boolean).join(' · ') || 'OCR service could not process the image';
           const err=new Error(msg);
-          err.retryable=/rate|limit|busy|temporar|timeout|server|try again/i.test(msg);
+          err.retryable=/busy|temporar|timeout|server|try again|overload|unavailable/i.test(msg);
+          if(/rate|limit|maximum|quota|subscription|invalid api|api key|file size|too large|dimension/i.test(msg)) err.retryable=false;
           throw err;
         }
         const parsed=Array.isArray(data?.ParsedResults)?data.ParsedResults[0]:null;
-        if(!parsed) throw new Error('OCR service returned no parsed result');
+        if(!parsed) { const err=new Error('OCR service returned no parsed result'); err.retryable=true; throw err; }
         const text=String(parsed?.ParsedText||'');
         const lines=overlayToLines(parsed?.TextOverlay);
         return {text,lines};
@@ -870,7 +874,8 @@
         else if(err instanceof TypeError) { lastError=new Error(`Could not reach OCR service: ${String(err?.message||'network error')}`); lastError.retryable=true; }
         else lastError=err;
         if(attempt>=maxAttempts || lastError?.retryable===false) throw lastError;
-        await wait(700*attempt);
+        // The free endpoint is more reliable when requests are deliberately spaced out.
+        await wait(attempt===1 ? 5000 : 12000);
       } finally { clearTimeout(timer); }
     }
     throw lastError||new Error('OCR request failed');
@@ -886,7 +891,17 @@
     fullCanvas.width=width; fullCanvas.height=height;
     const fullCtx=fullCanvas.getContext('2d',{alpha:false});
     fullCtx.fillStyle='#fff'; fullCtx.fillRect(0,0,width,height); fullCtx.drawImage(img,0,0,width,height);
-    const fullBlob=await canvasToBlob(fullCanvas,'image/jpeg',0.90);
+    // The free OCR.space API has a 1 MB upload limit. Keep screenshots comfortably below it.
+    let fullBlob=null;
+    for (const quality of [0.82,0.74,0.66,0.58]) {
+      fullBlob=await canvasToBlob(fullCanvas,'image/jpeg',quality);
+      if(fullBlob.size<=900000) break;
+    }
+    if(!fullBlob || fullBlob.size>1000000) {
+      const err=new Error(`Prepared screenshot is too large for the free OCR API (${Math.ceil((fullBlob?.size||0)/1024)} KB)`);
+      err.retryable=false;
+      throw err;
+    }
     const full=await ocrSpaceRecognize(fullBlob,apiKey,'cart-full');
 
     // The structured overlay normally contains enough coordinates to read Walmart's
@@ -895,10 +910,11 @@
     // traffic on normal batches and makes large screenshot imports more reliable.
     let priceLines=[];
     const fullPriceCount=screenshotPriceCandidates(full.lines,width,'full').length;
-    if(fullPriceCount<2) {
+    if(fullPriceCount<1) {
       onStage?.('Verifying price column…');
       const crop=createPriceColumnCanvas(img);
       const cropBlob=await canvasToBlob(crop.canvas,'image/jpeg',0.88);
+      await wait(1800);
       const price=await ocrSpaceRecognize(cropBlob,apiKey,'cart-prices');
       priceLines=mapCropLinesToImage(price.lines,crop);
     }
@@ -960,7 +976,7 @@
     if(!apiKey) return openOcrKeySetup(()=>processScreenshotFiles(files));
 
     const modal=openModal('Reading cart screenshots', `
-      <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'}. Grocery Companion queues them one at a time, retries temporary OCR failures, and keeps going if one image fails.</p>
+      <p class="small muted">Processing ${files.length} screenshot${files.length===1?'':'s'}. Grocery Companion sends one image at a time and deliberately pauses after every three screenshots to avoid flooding the free OCR endpoint.</p>
       <div class="ocr-status"><strong id="ocrStage">Preparing OCR…</strong><div class="progress-bar" style="margin-top:10px"><div class="progress-fill" id="ocrProgress" style="width:2%"></div></div><div class="small muted" id="ocrDetail" style="margin-top:8px">Nothing is added until you approve the review screen.</div></div>
     `);
     const stage=$('#ocrStage',modal),bar=$('#ocrProgress',modal),detail=$('#ocrDetail',modal);
@@ -985,10 +1001,24 @@
           allItems.push(...parsed);
         } catch(err) {
           console.warn(`Screenshot ${ix+1} OCR failed`,err);
-          failures.push({index:ix,name:files[ix].name||`Screenshot ${ix+1}`,error:compactOcrError(err)});
-          reportStage(`Screenshot ${ix+1} failed; continuing with the remaining images…`);
+          failures.push({index:ix,name:files[ix].name||`Screenshot ${ix+1}`,error:compactOcrError(err),retryable:err?.retryable!==false});
+          // If the free service itself is failing, do not fire six more doomed requests.
+          // Preserve any successful screenshots and stop the batch with the exact failure reason.
+          if(err?.retryable!==false) {
+            reportStage(`OCR service stopped at screenshot ${ix+1}: ${compactOcrError(err)}`);
+            break;
+          }
+          reportStage(`Screenshot ${ix+1} could not be processed; continuing…`);
         }
-        if(ix<files.length-1) await wait(450);
+        if(ix<files.length-1) {
+          if((ix+1)%3===0) {
+            safeText(stage,`Pausing after ${ix+1} screenshots`);
+            reportStage('Cooling down the free OCR service before the next group…');
+            await wait(8000);
+          } else {
+            await wait(2200);
+          }
+        }
       }
 
       safeText(stage,'Building grocery list…'); safeWidth(bar,97);
@@ -1000,11 +1030,12 @@
 
       if(modal?.isConnected) modal.remove();
       if(!items.length) {
-        const failureText=failures.length?`<p class="small muted">${failures.length} screenshot${failures.length===1?'':'s'} failed during OCR. Try those images again by themselves.</p>`:'';
+        const failureText=failures.length?`<div class="import-note"><strong>OCR failure:</strong> ${escapeHtml(failures[0].error)}${failures.length>1?`<br><span class="small">${failures.length} screenshots failed before the batch stopped.</span>`:''}</div>`:'';
         openModal('No new products recognized', `
           <p>The OCR service did not produce any new products that could be confidently added.</p>
           ${existingCheck.removed?`<p class="small muted">${existingCheck.removed} likely overlap duplicate${existingCheck.removed===1?' was':'s were'} already in this trip and ${existingCheck.removed===1?'was':'were'} skipped.</p>`:''}
           ${failureText}
+          <p class="small muted">If the error is an HTTP/service failure, wait a minute and try the same selection again. Grocery Companion now stops the batch instead of sending repeated requests into a failing free endpoint.</p>
           <button class="btn btn-primary btn-block" id="ocrFallbackPaste">Open paste importer</button>
         `, root=>$('#ocrFallbackPaste',root).addEventListener('click',()=>{root.remove();openPasteImportModal();}));
         return;
@@ -1072,7 +1103,7 @@
       options.failedCount?`${options.failedCount} screenshot${options.failedCount===1?'':'s'} failed and can be retried separately`:null
     ].filter(Boolean).join(' · ') : '';
     openModal(fromScreenshots?'Review screenshot import':'Review import', `
-      <p class="small muted">Nothing is added until you confirm. ${fromScreenshots?'OCR can misread product names, quantities, or prices, so check each row.':'Correct any item that was parsed incorrectly.'}</p>
+      <p class="small muted">Nothing is added until you confirm. ${fromScreenshots?'OCR can misread product names, quantities, or prices, so check each row.':'Correct any item that was parsed incorrectly.'}${fromScreenshots&&options.failedCount?` ${options.failedCount} screenshot${options.failedCount===1?'':'s'} could not be read; successful screenshots are preserved below.`:''}</p>
       ${batchNote?`<div class="import-note">${escapeHtml(batchNote)}</div>`:''}
       <div id="importRows" class="list">${items.map((i,ix)=>`<div class="card" style="margin:0"><label class="include-row"><input data-import-include="${ix}" type="checkbox" checked><strong>Include item</strong></label><div class="field"><label>Item</label><input data-import-name="${ix}" value="${escapeHtml(i.name)}"></div><div class="grid-2"><div class="field"><label>Qty</label><input data-import-qty="${ix}" type="number" min="1" step="1" value="${i.qty}"></div><div class="field"><label>Unit price</label><input data-import-price="${ix}" type="number" min="0" step="0.01" value="${i.unitPrice || ''}"></div></div><div class="field"><label>Category</label><select data-import-cat="${ix}">${categoryOptions(t.store,i.category)}</select></div></div>`).join('')}</div>
       <button class="btn btn-primary btn-block" id="confirmImport" style="margin-top:12px">Add reviewed items</button>
