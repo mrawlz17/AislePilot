@@ -1,8 +1,8 @@
-# Grocery Companion v0.3.3
+# Grocery Companion v0.3.4
 
 Reliability-first Walmart and Sam's Club shopping companion.
 
-## What changed in v0.3.3
+## What changed in v0.3.4
 
 - Shopping category order is now fixed for every store and is no longer editable in Settings.
 - The universal shopping order is: Personal Care → Other → Household → Dairy → Drinks → Pantry → Meat → Frozen → Bakery → Deli → Produce.
@@ -43,6 +43,12 @@ Trips, item history, learned categories, and preferences remain in browser local
 
 ## Deployment
 
-Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.3.3** before testing.
+Upload all files in this release directory to the GitHub Pages repository root and replace the previous release files. Reload Safari and verify **Settings → Version 0.3.4** before testing.
 
 The release package contains deployment/use files only; no internal QA artifacts are included.
+
+
+## v0.3.4 reliability changes
+- Fixed shopping order is the only route for both stores.
+- Cache-busted app assets so a GitHub Pages update cannot silently run an older app.js.
+- Quantity items use a lossless, high-accuracy OCR Engine 3 verification pass and mathematical reconciliation of total vs. each price.

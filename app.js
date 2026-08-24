@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '0.3.3';
+  const APP_VERSION = '0.3.4';
   const STORAGE_KEY = 'grocery-companion-state-v1';
   const OCR_KEY_STORAGE = 'grocery-companion-ocr-api-key';
   const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
@@ -266,6 +266,7 @@
           <button class="btn btn-secondary" data-plan-action="add">Add item</button>
           <button class="btn btn-secondary" data-plan-action="paste">Paste cart text</button>
         </div>
+        <p class="small muted" style="margin:10px 0 0"><strong>Shopping order:</strong> ${SHOP_ROUTE.join(' → ')}</p>
         <p class="import-note" style="margin-bottom:0">Upload up to 20 screenshots from the Walmart or Sam's Club cart in one selection. The app processes them in paced groups of three so the free OCR service is not flooded, retries temporary failures, removes likely overlap duplicates—including duplicates from earlier batches—and requires a review before adding anything to your list.</p>
       </section>
 
@@ -348,7 +349,7 @@
       </section>
       <section class="card">
         <h2>Screenshot OCR</h2>
-        <p class="muted small">Version 0.3.3 keeps paced multi-screenshot batches and adds targeted price verification for quantity items. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
+        <p class="muted small">Version 0.3.4 keeps paced multi-screenshot batches, locks the universal shopping route, and uses a higher-accuracy verification pass for quantity-item prices. Your API key stays only on this device and is not included in Grocery Companion backups.</p>
         <div class="field"><label>OCR.space API key</label><input id="ocrApiKey" type="password" autocomplete="off" placeholder="${hasOcrKey?'API key saved on this device':'Paste your free API key'}"></div>
         <div class="btn-row"><button class="btn btn-primary" data-settings-action="save-ocr-key">Save key</button><button class="btn btn-secondary" data-settings-action="test-ocr">Test OCR</button>${hasOcrKey?'<button class="btn btn-secondary" data-settings-action="clear-ocr-key">Remove key</button>':''}</div>
         <p class="small muted">Need a key? <a href="https://ocr.space/ocrapi/freekey" target="_blank" rel="noopener noreferrer">Get a free OCR.space API key</a>. Screenshot images are sent to OCR.space only when you choose Upload cart screenshots.</p>
@@ -646,10 +647,13 @@
 
   function parseScreenshotLayout(fullLines, priceLines, width, height, store) {
     if (!width || !height) return [];
-    const candidates=[
-      ...screenshotPriceCandidates(fullLines,width,'full'),
-      ...screenshotPriceCandidates(priceLines,width,'price')
-    ].sort((a,b)=>lineCenterY(a)-lineCenterY(b));
+    const fullCandidates=screenshotPriceCandidates(fullLines,width,'full');
+    const verificationCandidates=screenshotPriceCandidates(priceLines,width,'price');
+    // Keep item anchoring tied to the full-screen OCR. The high-accuracy price
+    // pass is only a verifier; Engine 3 overlay coordinates are intentionally
+    // less precise and must not reshuffle product blocks.
+    const candidates=(fullCandidates.length ? fullCandidates : verificationCandidates)
+      .sort((a,b)=>lineCenterY(a)-lineCenterY(b));
 
     const groups=[];
     for (const candidate of candidates) {
@@ -722,36 +726,53 @@
 
       let unitPrice=null;
       if (qty>1) {
-        // Quantity items get a dedicated price-column verification pass. The
-        // displayed total is authoritative; qty is then used to derive the unit
-        // price. A visible "$X.XX ea" value is accepted only when it reconciles
-        // to that verified total. This prevents one bad OCR digit from changing
-        // the projected trip total.
-        let verifiedTotal=priceLine.price;
-        const verifiedTotals=screenshotPriceCandidates(priceLines,width,'price')
-          .filter(c=>Math.abs(lineCenterY(c)-py)<=34)
-          .sort((a,b)=>{
-            const yDelta=Math.abs(lineCenterY(a)-py)-Math.abs(lineCenterY(b)-py);
-            if (Math.abs(yDelta)>2) return yDelta;
-            return num(b.priceConfidence,0)-num(a.priceConfidence,0);
-          });
-        if (verifiedTotals.length) verifiedTotal=verifiedTotals[0].price;
-
-        const derived=Math.round((verifiedTotal/qty)*100)/100;
-        const eachCandidates=[];
-        for (const [sourceLines,source] of [[priceLines,'price'],[fullLines,'full']]) {
+        // Build independent total/each-price candidates from the normal OCR and
+        // the high-accuracy verification OCR. Prefer a mathematically consistent
+        // pair, with the verification pass winning ties. This catches cases such
+        // as 5.31 total / Qty 3 / 1.77 ea even when the normal pass confuses 7/9.
+        const nearby=[];
+        for (const [sourceLines,source] of [[fullLines,'full'],[priceLines,'verify']]) {
           for (const line of sourceLines) {
             const cy=lineCenterY(line);
-            if (cy<py || cy>Math.min(py+185,regionEnd) || num(line.x1,0)<width*0.80) continue;
-            const each=line.text.match(/\$\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\s*(?:ea|each)\b/i);
-            if (!each) continue;
-            const value=num(`${each[1]}.${each[2]}`,0);
-            if (value>0) eachCandidates.push({value,source,confidence:num(line.confidence,0)});
+            if (cy<py-48 || cy>Math.min(py+210,regionEnd) || num(line.x1,0)<width*0.79) continue;
+            const parsed=extractScreenPrice(line.text);
+            if (!parsed || parsed.value<=0 || parsed.value>200) continue;
+            const isEach=/\b(?:ea|each)\b/i.test(line.text||'');
+            nearby.push({value:parsed.value,source,cy,line,isEach});
           }
         }
-        eachCandidates.sort((a,b)=>(b.source==='price'?1:0)-(a.source==='price'?1:0) || b.confidence-a.confidence);
-        const reconciled=eachCandidates.find(c=>Math.abs(c.value*qty-verifiedTotal)<=0.06);
-        unitPrice=reconciled ? reconciled.value : derived;
+
+        const totals=nearby.filter(c=>!c.isEach && c.cy<=py+62);
+        const eaches=[];
+        for (const c of nearby.filter(c=>c.isEach)) {
+          const m=String(c.line.text||'').match(/\$?\s*([0-9]{1,3})\s*[.,]\s*([0-9]{2})\s*(?:ea|each)\b/i);
+          if (m) eaches.push({...c,value:num(`${m[1]}.${m[2]}`,0)});
+        }
+
+        let best=null;
+        for (const each of eaches) {
+          for (const total of totals) {
+            const mismatch=Math.abs(each.value*qty-total.value);
+            if (mismatch>0.08) continue;
+            const verifyBonus=(each.source==='verify'?0.35:0)+(total.source==='verify'?0.35:0);
+            const proximityPenalty=(Math.abs(total.cy-py)+Math.max(0,each.cy-total.cy))*0.001;
+            const score=verifyBonus-mismatch*10-proximityPenalty;
+            if (!best || score>best.score) best={score,unit:each.value,total:total.value};
+          }
+        }
+        if (best) unitPrice=Math.round(best.unit*100)/100;
+        else {
+          const verifyTotals=totals.filter(c=>c.source==='verify').sort((a,b)=>Math.abs(a.cy-py)-Math.abs(b.cy-py));
+          const verifyEach=eaches.filter(c=>c.source==='verify').sort((a,b)=>Math.abs(a.cy-py)-Math.abs(b.cy-py));
+          // A direct Engine-3 "ea" read is more useful than deriving a unit
+          // price from a conflicting Engine-2 total. If there is no direct each
+          // value, derive from the Engine-3 total; only then fall back to Engine 2.
+          if (verifyEach.length) unitPrice=Math.round(verifyEach[0].value*100)/100;
+          else {
+            const verifiedTotal=verifyTotals[0]?.value ?? priceLine.price;
+            unitPrice=Math.round((verifiedTotal/qty)*100)/100;
+          }
+        }
       }
       if (unitPrice==null) unitPrice=Math.round((priceLine.price/qty)*100)/100;
 
@@ -799,11 +820,11 @@
   function createPriceColumnCanvas(img) {
     const width=img.naturalWidth||img.width;
     const height=img.naturalHeight||img.height;
-    const left=Math.floor(width*0.78);
-    const top=Math.min(300,Math.floor(height*0.12));
+    const left=Math.floor(width*0.76);
+    const top=Math.min(260,Math.floor(height*0.10));
     const cropWidth=Math.max(1,width-left);
     const cropHeight=Math.max(1,height-top);
-    const scale=2.5;
+    const scale=3.5;
     const canvas=document.createElement('canvas');
     canvas.width=Math.max(1,Math.round(cropWidth*scale));
     canvas.height=Math.max(1,Math.round(cropHeight*scale));
@@ -856,19 +877,22 @@
 
   const wait = ms => new Promise(resolve=>setTimeout(resolve,ms));
 
-  async function ocrSpaceRecognize(blob, apiKey, label='screenshot', timeoutMs=75000, maxAttempts=3) {
+  async function ocrSpaceRecognize(blob, apiKey, label='screenshot', timeoutMs=75000, maxAttempts=3, options={}) {
     if(!apiKey) throw new Error('OCR API key is not configured');
     let lastError=null;
     for(let attempt=1;attempt<=maxAttempts;attempt++) {
       const form=new FormData();
-      form.append('language','eng');
+      const engine=String(options.engine||2);
+      const filetype=String(options.filetype || (blob?.type==='image/png'?'PNG':'JPG')).toUpperCase();
+      form.append('language',options.language||'eng');
       form.append('isOverlayRequired','true');
-      form.append('OCREngine','2');
+      form.append('OCREngine',engine);
       form.append('detectOrientation','false');
-      form.append('scale','false');
-      form.append('isTable','false');
-      form.append('filetype','JPG');
-      form.append('file',blob,`${label.replace(/[^a-z0-9_-]+/gi,'-')}.jpg`);
+      form.append('scale',options.scale?'true':'false');
+      form.append('isTable',options.isTable?'true':'false');
+      form.append('filetype',filetype);
+      const ext=filetype==='PNG'?'png':'jpg';
+      form.append('file',blob,`${label.replace(/[^a-z0-9_-]+/gi,'-')}.${ext}`);
 
       const controller=new AbortController();
       const timer=setTimeout(()=>controller.abort(),timeoutMs);
@@ -942,9 +966,17 @@
     if(fullPriceCount<1 || multiQty) {
       onStage?.(multiQty ? 'Verifying quantity-item prices…' : 'Verifying price column…');
       const crop=createPriceColumnCanvas(img);
-      const cropBlob=await canvasToBlob(crop.canvas,'image/jpeg',0.88);
-      await wait(1800);
-      const price=await ocrSpaceRecognize(cropBlob,apiKey,'cart-prices');
+      // Use a lossless PNG plus OCR Engine 3 only for quantity-price verification.
+      // Engine 3 is slower, but OCR.space documents it as the highest-accuracy
+      // engine; the crop is small enough to stay well under the free API limit.
+      const cropBlob=await canvasToBlob(crop.canvas,'image/png',1);
+      if(cropBlob.size>1000000){
+        const err=new Error(`Price verification image is too large (${Math.ceil(cropBlob.size/1024)} KB)`);
+        err.retryable=false;
+        throw err;
+      }
+      await wait(2200);
+      const price=await ocrSpaceRecognize(cropBlob,apiKey,'cart-prices',90000,3,{engine:3,filetype:'PNG',scale:true,isTable:true});
       priceLines=mapCropLinesToImage(price.lines,crop);
     }
 

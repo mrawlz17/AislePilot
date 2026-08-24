@@ -1,5 +1,5 @@
-const APP_CACHE='grocery-companion-v0.3.3';
-const CORE=['./','./index.html','./styles.css','./app.js','./manifest.json','./icon.svg','./icon-180.png','./icon-512.png'];
+const APP_CACHE='grocery-companion-v0.3.4';
+const CORE=['./','./index.html','./styles.css?v=0.3.4','./app.js?v=0.3.4','./manifest.json','./icon.svg','./icon-180.png','./icon-512.png'];
 
 self.addEventListener('install',event=>event.waitUntil(
   caches.open(APP_CACHE).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting())
@@ -20,7 +20,7 @@ self.addEventListener('fetch',event=>{
   if(url.origin!==self.location.origin) return;
 
   event.respondWith(
-    fetch(event.request).then(resp=>{
+    fetch(event.request,{cache:'no-store'}).then(resp=>{
       if(resp.ok){
         const copy=resp.clone();
         caches.open(APP_CACHE).then(c=>c.put(event.request,copy)).catch(()=>{});
